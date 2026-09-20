@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, Router
-from aiogram.types import BusinessConnection, BusinessMessagesDeleted, Message, Update
+from aiogram.types import (
+    BusinessConnection,
+    BusinessMessagesDeleted,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -54,6 +61,7 @@ def init_db() -> None:
                 chat_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 sender_name TEXT,
+                sender_id INTEGER,
                 text TEXT,
                 message_date TEXT,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -61,6 +69,10 @@ def init_db() -> None:
             );
             """
         )
+        # Безопасная миграция уже созданной SQLite-базы.
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+        if "sender_id" not in columns:
+            connection.execute("ALTER TABLE messages ADD COLUMN sender_id INTEGER")
         connection.commit()
 
 
@@ -83,14 +95,16 @@ async def on_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
         return
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
+    sender_id = message.from_user.id if message.from_user else message.chat.id
     text = message.text or message.caption or f"[{message.content_type}]"
     with closing(db()) as database:
         database.execute(
             """INSERT OR REPLACE INTO messages
-               (business_connection_id, chat_id, message_id, sender_name, text, message_date, is_deleted)
-               VALUES (?, ?, ?, ?, ?, ?, 0)""",
+               (business_connection_id, chat_id, message_id, sender_name, sender_id,
+                text, message_date, is_deleted)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
             (message.business_connection_id, message.chat.id, message.message_id,
-             sender, text, message.date.isoformat()),
+             sender, sender_id, text, message.date.isoformat()),
         )
         database.commit()
 
@@ -122,7 +136,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     placeholders = ",".join("?" for _ in deleted_ids)
     with closing(db()) as database:
         rows = database.execute(
-            f"""SELECT message_id, sender_name, text, message_date FROM messages
+            f"""SELECT message_id, sender_name, sender_id, text, message_date FROM messages
                 WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
         ).fetchall()
@@ -140,10 +154,21 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         return
     if rows:
         for row in rows:
+            reply_markup = None
+            if row["sender_id"]:
+                reply_markup = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="Открыть чат",
+                            url=f"tg://user?id={row['sender_id']}",
+                        )
+                    ]]
+                )
             await bot.send_message(
                 owner[0],
                 f"🗑 Сообщение удалено\nОт: {row['sender_name']}\n"
                 f"Время: {row['message_date']}\n\n{row['text']}",
+                reply_markup=reply_markup,
             )
     else:
         await bot.send_message(owner[0], "🗑 Сообщение удалено, но копия не была сохранена.")
