@@ -19,7 +19,7 @@ from aiogram.types import (
     Update,
 )
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Request
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("telegram-business-archive")
@@ -206,9 +206,7 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/telegram/webhook")
-async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Optional[str] = Header(default=None)) -> dict[str, bool]:
-    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-        raise HTTPException(status_code=403, detail="Invalid webhook secret")
+async def telegram_webhook(request: Request) -> dict[str, bool]:
     payload = await request.json()
     logger.info("Telegram update received: update_id=%s keys=%s",
                 payload.get("update_id"), [key for key in payload if key != "update_id"])
@@ -222,7 +220,7 @@ async def startup() -> None:
     if WEBHOOK_URL:
         await bot.set_webhook(
             f"{WEBHOOK_URL}/telegram/webhook",
-            secret_token=WEBHOOK_SECRET or None,
+            secret_token=None,
             allowed_updates=["business_connection", "business_message", "edited_business_message", "deleted_business_messages"],
         )
 
