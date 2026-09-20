@@ -229,5 +229,6 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    await bot.delete_webhook()
+    # Не удаляем webhook при перезапуске Render: старый процесс может
+    # остановиться уже после запуска нового и отключить рабочий webhook.
     await bot.session.close()
