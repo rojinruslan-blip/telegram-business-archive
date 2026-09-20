@@ -76,6 +76,21 @@ def init_db() -> None:
         connection.commit()
 
 
+async def ensure_connection(connection_id: str) -> None:
+    """Восстанавливает владельца после перезапуска Render."""
+    connection = await bot.get_business_connection(connection_id)
+    with closing(db()) as database:
+        database.execute(
+            """INSERT INTO connections(business_connection_id, owner_chat_id, is_enabled)
+               VALUES (?, ?, ?)
+               ON CONFLICT(business_connection_id) DO UPDATE SET
+                 owner_chat_id=excluded.owner_chat_id,
+                 is_enabled=excluded.is_enabled""",
+            (connection.id, connection.user_chat_id, int(connection.is_enabled)),
+        )
+        database.commit()
+
+
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection) -> None:
     with closing(db()) as database:
@@ -94,6 +109,7 @@ async def on_business_connection(connection: BusinessConnection) -> None:
 async def on_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
         return
+    await ensure_connection(message.business_connection_id)
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     text = message.text or message.caption or f"[{message.content_type}]"
@@ -133,6 +149,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     deleted_ids = list(event.message_ids)
     if not deleted_ids:
         return
+    await ensure_connection(event.business_connection_id)
     placeholders = ",".join("?" for _ in deleted_ids)
     with closing(db()) as database:
         rows = database.execute(
