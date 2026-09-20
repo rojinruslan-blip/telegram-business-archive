@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 from contextlib import closing
@@ -19,6 +20,9 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("telegram-business-archive")
 
 load_dotenv()
 
@@ -93,6 +97,7 @@ async def ensure_connection(connection_id: str) -> None:
 
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection) -> None:
+    logger.info("Business connection update: id=%s enabled=%s", connection.id, connection.is_enabled)
     with closing(db()) as database:
         database.execute(
             """INSERT INTO connections(business_connection_id, owner_chat_id, is_enabled)
@@ -109,6 +114,8 @@ async def on_business_connection(connection: BusinessConnection) -> None:
 async def on_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
         return
+    logger.info("Business message update: connection=%s chat=%s message=%s",
+                message.business_connection_id, message.chat.id, message.message_id)
     await ensure_connection(message.business_connection_id)
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
@@ -149,6 +156,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     deleted_ids = list(event.message_ids)
     if not deleted_ids:
         return
+    logger.info("Deleted business messages update: connection=%s chat=%s ids=%s",
+                event.business_connection_id, event.chat.id, deleted_ids)
     await ensure_connection(event.business_connection_id)
     placeholders = ",".join("?" for _ in deleted_ids)
     with closing(db()) as database:
@@ -201,6 +210,8 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: Op
     if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
     payload = await request.json()
+    logger.info("Telegram update received: update_id=%s keys=%s",
+                payload.get("update_id"), [key for key in payload if key != "update_id"])
     await dispatcher.feed_update(bot, Update.model_validate(payload))
     return {"ok": True}
 
