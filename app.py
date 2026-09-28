@@ -67,6 +67,8 @@ def init_db() -> None:
                 sender_name TEXT,
                 sender_id INTEGER,
                 text TEXT,
+                media_type TEXT,
+                media_file_id TEXT,
                 message_date TEXT,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (business_connection_id, chat_id, message_id)
@@ -77,7 +79,30 @@ def init_db() -> None:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
         if "sender_id" not in columns:
             connection.execute("ALTER TABLE messages ADD COLUMN sender_id INTEGER")
+        if "media_type" not in columns:
+            connection.execute("ALTER TABLE messages ADD COLUMN media_type TEXT")
+        if "media_file_id" not in columns:
+            connection.execute("ALTER TABLE messages ADD COLUMN media_file_id TEXT")
         connection.commit()
+
+
+def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
+    """Return the Telegram file type and reusable file_id for a message."""
+    if message.voice:
+        return "voice", message.voice.file_id
+    if message.photo:
+        return "photo", message.photo[-1].file_id
+    if message.video:
+        return "video", message.video.file_id
+    if message.audio:
+        return "audio", message.audio.file_id
+    if message.document:
+        return "document", message.document.file_id
+    if message.animation:
+        return "animation", message.animation.file_id
+    if message.video_note:
+        return "video_note", message.video_note.file_id
+    return None, None
 
 
 async def ensure_connection(connection_id: str) -> None:
@@ -120,14 +145,15 @@ async def on_business_message(message: Message) -> None:
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     text = message.text or message.caption or f"[{message.content_type}]"
+    media_type, media_file_id = extract_media(message)
     with closing(db()) as database:
         database.execute(
             """INSERT OR REPLACE INTO messages
                (business_connection_id, chat_id, message_id, sender_name, sender_id,
-                text, message_date, is_deleted)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+                text, media_type, media_file_id, message_date, is_deleted)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
             (message.business_connection_id, message.chat.id, message.message_id,
-             sender, sender_id, text, message.date.isoformat()),
+             sender, sender_id, text, media_type, media_file_id, message.date.isoformat()),
         )
         database.commit()
 
@@ -162,7 +188,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     placeholders = ",".join("?" for _ in deleted_ids)
     with closing(db()) as database:
         rows = database.execute(
-            f"""SELECT message_id, sender_name, sender_id, text, message_date FROM messages
+            f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
+                       message_date FROM messages
                 WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
         ).fetchall()
@@ -190,12 +217,37 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
                         )
                     ]]
                 )
-            await bot.send_message(
-                owner[0],
+            header = (
                 f"🗑 Сообщение удалено\nОт: {row['sender_name']}\n"
-                f"Время: {row['message_date']}\n\n{row['text']}",
-                reply_markup=reply_markup,
+                f"Время: {row['message_date']}"
             )
+            body = row["text"] or ""
+            caption = f"{header}\n\n{body}".strip()
+            media_type = row["media_type"]
+            media_file_id = row["media_file_id"]
+            if not media_type or not media_file_id:
+                await bot.send_message(owner[0], caption, reply_markup=reply_markup)
+                continue
+
+            # Telegram captions are limited to 1024 characters for media.
+            caption = caption[:1024]
+            if media_type == "voice":
+                await bot.send_voice(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == "photo":
+                await bot.send_photo(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == "video":
+                await bot.send_video(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == "audio":
+                await bot.send_audio(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == "document":
+                await bot.send_document(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == "animation":
+                await bot.send_animation(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
+            elif media_type == "video_note":
+                await bot.send_message(owner[0], caption, reply_markup=reply_markup)
+                await bot.send_video_note(owner[0], media_file_id)
+            else:
+                await bot.send_message(owner[0], caption, reply_markup=reply_markup)
     else:
         await bot.send_message(owner[0], "🗑 Сообщение удалено, но копия не была сохранена.")
 
