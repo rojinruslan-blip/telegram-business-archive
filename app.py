@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -43,6 +44,7 @@ dispatcher = Dispatcher()
 router = Router()
 dispatcher.include_router(router)
 app = FastAPI(title="Telegram Business message archive")
+MASS_DELETE_THRESHOLD = int(os.environ.get("MASS_DELETE_THRESHOLD", "10"))
 
 
 def db() -> sqlite3.Connection:
@@ -177,6 +179,46 @@ async def on_edited_business_message(message: Message) -> None:
         await bot.send_message(owner[0], f"✏️ Сообщение изменено в чате {message.chat.id}:\n{text}")
 
 
+def build_chat_backup(rows: list[sqlite3.Row], connection_id: str, chat_id: int) -> bytes:
+    """Serialize deleted messages into one portable backup file."""
+    backup = {
+        "format": "telegram-business-archive",
+        "version": 1,
+        "business_connection_id": connection_id,
+        "chat_id": chat_id,
+        "message_count": len(rows),
+        "messages": [
+            {
+                "message_id": row["message_id"],
+                "sender_name": row["sender_name"],
+                "sender_id": row["sender_id"],
+                "text": row["text"],
+                "media_type": row["media_type"],
+                "media_file_id": row["media_file_id"],
+                "message_date": row["message_date"],
+            }
+            for row in sorted(rows, key=lambda item: item["message_id"])
+        ],
+    }
+    return json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+async def send_mass_delete_backup(owner_chat_id: int, rows: list[sqlite3.Row],
+                                  connection_id: str, chat_id: int) -> None:
+    backup = build_chat_backup(rows, connection_id, chat_id)
+    filename = f"chat_{chat_id}_backup.json"
+    document = BufferedInputFile(backup, filename=filename)
+    await bot.send_document(
+        owner_chat_id,
+        document=document,
+        caption=(
+            f"🗂 Резервная копия удалённого чата\n"
+            f"Сообщений: {len(rows)}\n"
+            "Текст и данные медиа сохранены в одном JSON-файле."
+        ),
+    )
+
+
 @router.deleted_business_messages()
 async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     deleted_ids = list(event.message_ids)
@@ -205,7 +247,11 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         database.commit()
     if not owner:
         return
-    if rows:
+    if rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
+        await send_mass_delete_backup(
+            owner[0], rows, event.business_connection_id, event.chat.id
+        )
+    elif rows:
         for row in rows:
             reply_markup = None
             if row["sender_id"]:
