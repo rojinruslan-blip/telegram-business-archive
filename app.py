@@ -850,6 +850,12 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
+        try:
+        await bot.set_my_short_description(short_description=BOT_SHORT_DESCRIPTION)
+        await bot.set_my_description(description=BOT_DESCRIPTION)
+        except Exception:
+        logger.exception("Could not update bot profile description")
+
     if WEBHOOK_URL:
         await bot.set_webhook(
             f"{WEBHOOK_URL}/telegram/webhook",
