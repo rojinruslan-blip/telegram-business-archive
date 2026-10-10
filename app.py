@@ -399,10 +399,13 @@ async def on_edited_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
         return
     text = message.text or message.caption or f"[{message.content_type}]"
+    sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
+    sender_id = message.from_user.id if message.from_user else message.chat.id
     with closing(db()) as database:
         database.execute(
-            "UPDATE messages SET text=? WHERE business_connection_id=? AND chat_id=? AND message_id=?",
-            (text, message.business_connection_id, message.chat.id, message.message_id),
+            """UPDATE messages SET text=?, sender_name=?, sender_id=?
+               WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+            (text, sender, sender_id, message.business_connection_id, message.chat.id, message.message_id),
         )
         owner = database.execute(
             "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
@@ -410,7 +413,14 @@ async def on_edited_business_message(message: Message) -> None:
         ).fetchone()
         database.commit()
     if owner and owner_settings(owner[0])["notify_edits"]:
-        await bot.send_message(owner[0], f"✏️ Сообщение изменено в чате {message.chat.id}:\n{text}")
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={sender_id}")
+        ]])
+        await bot.send_message(
+            owner[0],
+            f"✏️ Сообщение изменено\nОт: {sender}\n\n{text}",
+            reply_markup=reply_markup,
+        )
 
 
 def build_chat_backup(rows: list[sqlite3.Row], connection_id: str, chat_id: int) -> bytes:
@@ -500,8 +510,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
                     ]]
                 )
             header = (
-                f"🗑 Сообщение удалено\nОт: {row['sender_name']}\n"
-                f"Время: {row['message_date']}"
+                f"🗑 Сообщение удалено\nОт: {row['sender_name']}"
             )
             body = row["text"] or ""
             caption = f"{header}\n\n{body}".strip()
