@@ -196,6 +196,7 @@ def init_db() -> None:
                 media_bytes BYTEA,
                 message_date TEXT,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
+                notification_sent INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (business_connection_id, chat_id, message_id)
             );
             CREATE TABLE IF NOT EXISTS owner_settings (
@@ -235,6 +236,9 @@ def init_db() -> None:
                     f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"
                 )
             connection.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_bytes BYTEA")
+            connection.execute(
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS notification_sent INTEGER NOT NULL DEFAULT 0"
+            )
             connection.commit()
             return
         # Безопасная миграция уже созданной SQLite-базы.
@@ -247,6 +251,10 @@ def init_db() -> None:
             connection.execute("ALTER TABLE messages ADD COLUMN media_file_id TEXT")
         if "media_bytes" not in columns:
             connection.execute("ALTER TABLE messages ADD COLUMN media_bytes BLOB")
+        if "notification_sent" not in columns:
+            connection.execute(
+                "ALTER TABLE messages ADD COLUMN notification_sent INTEGER NOT NULL DEFAULT 0"
+            )
         asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(bot_assets)")}
         if "caption" not in asset_columns:
             connection.execute("ALTER TABLE bot_assets ADD COLUMN caption TEXT NOT NULL DEFAULT ''")
@@ -312,6 +320,7 @@ def set_owner_setting(owner_chat_id: int, field: str, value: int) -> None:
             (value, owner_chat_id),
         )
         connection.commit()
+    OWNER_SETTINGS_CACHE.pop(owner_chat_id, None)
 
 
 
@@ -580,6 +589,7 @@ async def menu_home(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             "🛡 Главное меню бота:", reply_markup=menu_keyboard()
         )
+    await callback.answer()
 
 
 
@@ -612,6 +622,7 @@ async def menu_setup(callback: CallbackQuery) -> None:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]))
+    await callback.answer()
 
 
 
@@ -629,6 +640,7 @@ async def menu_support(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]),
     )
+    await callback.answer()
 
 
 
@@ -654,6 +666,7 @@ async def menu_demo(callback: CallbackQuery) -> None:
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
             ]),
         )
+    await callback.answer()
 
 
 
@@ -674,6 +687,7 @@ async def menu_settings(callback: CallbackQuery) -> None:
         await bot.send_message(callback.from_user.id, text, reply_markup=markup)
     else:
         await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
 
 
 
@@ -691,12 +705,14 @@ async def toggle_setting(callback: CallbackQuery) -> None:
         "old_media", "archive_enabled",
     }
     if field not in allowed:
+        await callback.answer("Неизвестная настройка", show_alert=True)
         return
     settings = owner_settings(callback.from_user.id)
     set_owner_setting(callback.from_user.id, field, 0 if settings[field] else 1)
     await callback.message.edit_reply_markup(
         reply_markup=settings_keyboard(owner_settings(callback.from_user.id))
     )
+    await callback.answer("Настройка обновлена")
                     
 
 
@@ -717,6 +733,7 @@ async def menu_archive(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]),
     )
+    await callback.answer()
 
 
 
@@ -734,6 +751,7 @@ async def menu_retention(callback: CallbackQuery) -> None:
         f"🗄 Срок хранения\n\nТекущий срок: {current}",
         reply_markup=retention_keyboard(settings),
     )
+    await callback.answer()
 
 
 
@@ -751,6 +769,7 @@ async def set_retention(callback: CallbackQuery) -> None:
         f"🗄 Срок хранения установлен: {'без ограничений' if not days else f'{days} дней'}",
         reply_markup=retention_keyboard(owner_settings(callback.from_user.id)),
     )
+    await callback.answer("Срок хранения обновлён")
 
 
 
@@ -798,12 +817,6 @@ def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
-
-
-
-
-
-
 def media_source(message: Message) -> Message:
     """Use the replied-to message when Telegram nests view-once media there."""
     if extract_media(message) != (None, None):
@@ -813,6 +826,12 @@ def media_source(message: Message) -> Message:
         if candidate and extract_media(candidate) != (None, None):
             return candidate
     return message
+
+
+
+
+
+
 
 
 async def download_media(file_id: Optional[str]) -> Optional[bytes]:
@@ -914,12 +933,15 @@ async def on_business_message(message: Message) -> None:
     media_type, media_file_id = extract_media(source)
     timer_media = is_timer_media(source)
     source_message_id = source.message_id
-    # Save both IDs before downloading. For a reply to view-once media,
-    # Telegram can send the deletion update for the reply ID instead of the
-    # nested media ID. Either key must restore the same saved copy.
+    # Save the message row before downloading the file.  A disappearing
+    # message can generate its deletion update while the file download is
+    # still in progress; inserting first lets that update find the archive.
     message_ids = {source_message_id, message.message_id}
     with closing(db()) as database:
         for archive_message_id in message_ids:
+            # For a reply to view-once media Telegram may send the deletion
+            # update for the reply ID, not for the nested media ID. Keep both
+            # keys pointing to the same saved copy so either update restores it.
             database.execute(
                 """INSERT INTO messages
                    (business_connection_id, chat_id, message_id, sender_name, sender_id,
@@ -937,8 +959,8 @@ async def on_business_message(message: Message) -> None:
             )
         database.commit()
     logger.info(
-        "Business message captured: message=%s source_message=%s content_type=%s "
-        "media_type=%s timer_media=%s has_file_id=%s",
+        "Business message captured: message=%s source_message=%s content_type=%s media_type=%s "
+        "timer_media=%s has_file_id=%s",
         message.message_id, source_message_id, source.content_type, media_type,
         timer_media, bool(media_file_id),
     )
@@ -957,6 +979,41 @@ async def on_business_message(message: Message) -> None:
             "Business media copy saved: message=%s media_type=%s timer_media=%s bytes=%s",
             source_message_id, media_type, timer_media, len(media_bytes) if media_bytes else 0,
         )
+    # Telegram does not reliably emit a deletion update when view-once media
+    # expires.  A media object nested in a reply is the reliable signal that
+    # the user answered a disappearing-media message, so send its durable
+    # copy immediately instead of waiting for an event that may never arrive.
+    if (
+        source_message_id != message.message_id
+        and media_type
+        and owner_settings(owner["owner_chat_id"])["media_timers"]
+    ):
+        with closing(db()) as database:
+            saved = database.execute(
+                """SELECT business_connection_id, chat_id, message_id, sender_name,
+                          sender_id, text, media_type, media_file_id, media_bytes,
+                          message_date, notification_sent
+                   FROM messages
+                   WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+                (message.business_connection_id, message.chat.id, source_message_id),
+            ).fetchone()
+        if saved and not saved["notification_sent"]:
+            logger.info(
+                "Sending nested disappearing-media copy immediately: source_message=%s",
+                source_message_id,
+            )
+            await send_deleted_message(
+                owner["owner_chat_id"], saved, header="📸 Копия исчезающего медиа"
+            )
+            mark_notification_sent(
+                message.business_connection_id, message.chat.id, message_ids
+            )
+
+
+
+
+
+
 
 
 @router.edited_business_message()
@@ -1045,10 +1102,14 @@ def deleted_message_markup(row: sqlite3.Row) -> Optional[InlineKeyboardMarkup]:
 
 
 
-async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
-    """Send the saved message back, including media that later expired or was deleted."""
+async def send_deleted_message(
+    owner_chat_id: int,
+    row: sqlite3.Row,
+    header: str = "🗑 Сообщение удалено",
+) -> None:
+    """Send a saved message back, including media that later expired or was deleted."""
     reply_markup = deleted_message_markup(row)
-    header = f"🗑 Сообщение удалено\nОт: {row['sender_name'] or 'Неизвестный отправитель'}"
+    header = f"{header}\nОт: {row['sender_name'] or 'Неизвестный отправитель'}"
     body = row["text"] or ""
     caption = f"{header}\n\n{body}".strip()
     media_type = row["media_type"]
@@ -1105,6 +1166,18 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
 
 
+def mark_notification_sent(connection_id: str, chat_id: int, message_ids: set[int]) -> None:
+    placeholders = ",".join("?" for _ in message_ids)
+    with closing(db()) as database:
+        database.execute(
+            f"""UPDATE messages SET notification_sent=1
+                WHERE business_connection_id=? AND chat_id=?
+                  AND message_id IN ({placeholders})""",
+            (connection_id, chat_id, *message_ids),
+        )
+        database.commit()
+
+
 
 
 
@@ -1130,7 +1203,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         matched_by_connection_only = False
         rows = database.execute(
             f"""SELECT business_connection_id, chat_id, message_id, sender_name, sender_id,
-                       text, media_type, media_file_id, media_bytes, message_date FROM messages
+                       text, media_type, media_file_id, media_bytes, message_date,
+                       notification_sent FROM messages
                 WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})
                   AND is_deleted=0""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
@@ -1141,7 +1215,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
             # резервно ищем сообщение в рамках конкретного подключения.
             rows = database.execute(
                 f"""SELECT business_connection_id, chat_id, message_id, sender_name, sender_id,
-                           text, media_type, media_file_id, media_bytes, message_date FROM messages
+                           text, media_type, media_file_id, media_bytes, message_date,
+                           notification_sent FROM messages
                     WHERE business_connection_id=? AND message_id IN ({placeholders})
                       AND is_deleted=0""",
                 [event.business_connection_id, *deleted_ids],
@@ -1178,13 +1253,14 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         return
     if not owner_settings(owner["owner_chat_id"])["notify_deletions"]:
         return
-    if rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
+    pending_rows = [row for row in rows if not row["notification_sent"]]
+    if pending_rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
         await bot.send_message(
             owner["owner_chat_id"],
-            f"🗂 В чате удалено сообщений: {len(rows)}. Сохранённые копии — ниже.",
+            f"🗂 В чате удалено сообщений: {len(pending_rows)}. Сохранённые копии — ниже.",
         )
-        await send_mass_delete_backup(owner["owner_chat_id"], rows, event.chat.id)
-    for row in rows:
+        await send_mass_delete_backup(owner["owner_chat_id"], pending_rows, event.chat.id)
+    for row in pending_rows:
         await send_deleted_message(owner["owner_chat_id"], row)
 
 
