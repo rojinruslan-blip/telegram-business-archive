@@ -9,11 +9,13 @@ from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import CommandStart
 from aiogram.types import (
     BusinessConnection,
     BusinessMessagesDeleted,
     BufferedInputFile,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -38,6 +40,8 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/messages.sqlite3"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+SETUP_VIDEO_FILE_ID = os.environ.get("SETUP_VIDEO_FILE_ID", "")
+DEMO_VIDEO_FILE_ID = os.environ.get("DEMO_VIDEO_FILE_ID", "")
 
 bot = Bot(BOT_TOKEN)
 dispatcher = Dispatcher()
@@ -75,6 +79,16 @@ def init_db() -> None:
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (business_connection_id, chat_id, message_id)
             );
+            CREATE TABLE IF NOT EXISTS owner_settings (
+                owner_chat_id INTEGER PRIMARY KEY,
+                notify_edits INTEGER NOT NULL DEFAULT 1,
+                notify_deletions INTEGER NOT NULL DEFAULT 1,
+                media_timers INTEGER NOT NULL DEFAULT 1,
+                incognito INTEGER NOT NULL DEFAULT 0,
+                old_media INTEGER NOT NULL DEFAULT 0,
+                archive_enabled INTEGER NOT NULL DEFAULT 1,
+                retention_days INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
         # Безопасная миграция уже созданной SQLite-базы.
@@ -86,6 +100,204 @@ def init_db() -> None:
         if "media_file_id" not in columns:
             connection.execute("ALTER TABLE messages ADD COLUMN media_file_id TEXT")
         connection.commit()
+
+
+def ensure_owner_settings(owner_chat_id: int) -> None:
+    with closing(db()) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO owner_settings(owner_chat_id) VALUES (?)",
+            (owner_chat_id,),
+        )
+        connection.commit()
+
+
+def owner_settings(owner_chat_id: int) -> sqlite3.Row:
+    ensure_owner_settings(owner_chat_id)
+    with closing(db()) as connection:
+        return connection.execute(
+            "SELECT * FROM owner_settings WHERE owner_chat_id=?",
+            (owner_chat_id,),
+        ).fetchone()
+
+
+def set_owner_setting(owner_chat_id: int, field: str, value: int) -> None:
+    allowed = {
+        "notify_edits", "notify_deletions", "media_timers", "incognito",
+        "old_media", "archive_enabled", "retention_days",
+    }
+    if field not in allowed:
+        raise ValueError(f"Unsupported owner setting: {field}")
+    ensure_owner_settings(owner_chat_id)
+    with closing(db()) as connection:
+        connection.execute(
+            f"UPDATE owner_settings SET {field}=? WHERE owner_chat_id=?",
+            (value, owner_chat_id),
+        )
+        connection.commit()
+
+
+def archive_stats(owner_chat_id: int) -> tuple[int, int]:
+    with closing(db()) as connection:
+        row = connection.execute(
+            """SELECT COUNT(*) AS total, COALESCE(SUM(is_deleted), 0) AS deleted
+               FROM messages m JOIN connections c
+                 ON c.business_connection_id=m.business_connection_id
+               WHERE c.owner_chat_id=?""",
+            (owner_chat_id,),
+        ).fetchone()
+    return int(row["total"]), int(row["deleted"])
+
+
+def menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❓ Как подключить?", callback_data="menu:setup")],
+        [InlineKeyboardButton(text="🖼 Демонстрация работы бота", callback_data="menu:demo")],
+        [InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="menu:settings")],
+        [InlineKeyboardButton(text="🗃 Архив", callback_data="menu:archive")],
+        [InlineKeyboardButton(text="🗄 Срок хранения", callback_data="menu:retention")],
+    ])
+
+
+def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
+    mark = lambda enabled: "✅" if settings[enabled] else "❌"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✏️ Изменения {mark('notify_edits')}", callback_data="toggle:notify_edits")],
+        [InlineKeyboardButton(text=f"🗑 Удаления {mark('notify_deletions')}", callback_data="toggle:notify_deletions")],
+        [InlineKeyboardButton(text=f"📸 Медиа с таймером {mark('media_timers')}", callback_data="toggle:media_timers")],
+        [InlineKeyboardButton(text=f"🕵️ Инкогнито {mark('incognito')}", callback_data="toggle:incognito")],
+        [InlineKeyboardButton(text=f"📅 Старое медиа {mark('old_media')}", callback_data="toggle:old_media")],
+        [InlineKeyboardButton(text=f"🗃 Архив {mark('archive_enabled')}", callback_data="toggle:archive_enabled")],
+        [InlineKeyboardButton(text="🗄 Срок хранения", callback_data="menu:retention")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")],
+    ])
+
+
+def retention_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
+    current = "без ограничений" if not settings["retention_days"] else f"{settings['retention_days']} дн."
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="7 дней", callback_data="retention:7"),
+         InlineKeyboardButton(text="30 дней", callback_data="retention:30")],
+        [InlineKeyboardButton(text="90 дней", callback_data="retention:90"),
+         InlineKeyboardButton(text="Без ограничений", callback_data="retention:0")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:settings")],
+    ])
+
+
+async def send_home(chat_id: int) -> None:
+    await bot.send_message(
+        chat_id,
+        "🛡 Здесь можно настроить сохранение удалённых и изменённых сообщений.\n\n"
+        "Подключите бота к Telegram Business, а нужные уведомления настройте в меню ниже.",
+        reply_markup=menu_keyboard(),
+    )
+
+
+@router.message(CommandStart())
+async def on_start(message: Message) -> None:
+    ensure_owner_settings(message.from_user.id)
+    await send_home(message.chat.id)
+
+
+@router.callback_query(F.data == "menu:home")
+async def menu_home(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "🛡 Главное меню бота:", reply_markup=menu_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:setup")
+async def menu_setup(callback: CallbackQuery) -> None:
+    text = (
+        "❓ Как подключить?\n\n"
+        "1. Откройте настройки Telegram.\n"
+        "2. Перейдите в раздел Telegram Business.\n"
+        "3. Откройте подключённых ботов и добавьте этого бота.\n"
+        "4. Разрешите доступ к сообщениям и уведомлениям об изменениях.\n\n"
+        "Видео-инструкция будет добавлена сюда."
+    )
+    if SETUP_VIDEO_FILE_ID:
+        await bot.send_video(callback.from_user.id, SETUP_VIDEO_FILE_ID, caption=text)
+    else:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
+        ]))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:demo")
+async def menu_demo(callback: CallbackQuery) -> None:
+    if DEMO_VIDEO_FILE_ID:
+        await bot.send_video(
+            callback.from_user.id,
+            DEMO_VIDEO_FILE_ID,
+            caption="🖼 Демонстрация: бот сохраняет сообщения до их удаления.",
+        )
+    else:
+        await callback.message.edit_text(
+            "🖼 Демонстрационный материал подготовим и добавим сюда.\n\n"
+            "Сейчас бот уже умеет сохранять удалённые сообщения, изменения и медиа.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
+            ]),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:settings")
+async def menu_settings(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "🔔 Настройки уведомлений:\n\n"
+        "Выберите, какие события и материалы нужно получать.",
+        reply_markup=settings_keyboard(owner_settings(callback.from_user.id)),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("toggle:"))
+async def toggle_setting(callback: CallbackQuery) -> None:
+    field = callback.data.split(":", 1)[1]
+    settings = owner_settings(callback.from_user.id)
+    set_owner_setting(callback.from_user.id, field, 0 if settings[field] else 1)
+    await callback.message.edit_reply_markup(
+        reply_markup=settings_keyboard(owner_settings(callback.from_user.id))
+    )
+    await callback.answer("Настройка обновлена")
+
+
+@router.callback_query(F.data == "menu:archive")
+async def menu_archive(callback: CallbackQuery) -> None:
+    total, deleted = archive_stats(callback.from_user.id)
+    await callback.message.edit_text(
+        f"🗃 Архив\n\nВсего сохранено сообщений: {total}\nУдалённых сообщений: {deleted}\n\n"
+        "Архив работает автоматически после подключения Telegram Business.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:retention")
+async def menu_retention(callback: CallbackQuery) -> None:
+    settings = owner_settings(callback.from_user.id)
+    current = "без ограничений" if not settings["retention_days"] else f"{settings['retention_days']} дней"
+    await callback.message.edit_text(
+        f"🗄 Срок хранения\n\nТекущий срок: {current}",
+        reply_markup=retention_keyboard(settings),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("retention:"))
+async def set_retention(callback: CallbackQuery) -> None:
+    days = int(callback.data.split(":", 1)[1])
+    set_owner_setting(callback.from_user.id, "retention_days", days)
+    await callback.message.edit_text(
+        f"🗄 Срок хранения установлен: {'без ограничений' if not days else f'{days} дней'}",
+        reply_markup=retention_keyboard(owner_settings(callback.from_user.id)),
+    )
+    await callback.answer("Срок хранения обновлён")
 
 
 def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
@@ -120,6 +332,7 @@ async def ensure_connection(connection_id: str) -> None:
             (connection.id, connection.user_chat_id, int(connection.is_enabled)),
         )
         database.commit()
+    ensure_owner_settings(connection.user_chat_id)
 
 
 @router.business_connection()
@@ -135,6 +348,7 @@ async def on_business_connection(connection: BusinessConnection) -> None:
             (connection.id, connection.user_chat_id, int(connection.is_enabled)),
         )
         database.commit()
+    ensure_owner_settings(connection.user_chat_id)
 
 
 @router.business_message()
@@ -144,6 +358,13 @@ async def on_business_message(message: Message) -> None:
     logger.info("Business message update: connection=%s chat=%s message=%s",
                 message.business_connection_id, message.chat.id, message.message_id)
     await ensure_connection(message.business_connection_id)
+    with closing(db()) as database:
+        owner = database.execute(
+            "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
+            (message.business_connection_id,),
+        ).fetchone()
+    if owner and not owner_settings(owner[0])["archive_enabled"]:
+        return
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     text = message.text or message.caption or f"[{message.content_type}]"
@@ -175,7 +396,7 @@ async def on_edited_business_message(message: Message) -> None:
             (message.business_connection_id,),
         ).fetchone()
         database.commit()
-    if owner:
+    if owner and owner_settings(owner[0])["notify_edits"]:
         await bot.send_message(owner[0], f"✏️ Сообщение изменено в чате {message.chat.id}:\n{text}")
 
 
@@ -246,6 +467,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         ).fetchone()
         database.commit()
     if not owner:
+        return
+    if not owner_settings(owner[0])["notify_deletions"]:
         return
     if rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
         await send_mass_delete_backup(
@@ -319,7 +542,10 @@ async def startup() -> None:
         await bot.set_webhook(
             f"{WEBHOOK_URL}/telegram/webhook",
             secret_token=None,
-            allowed_updates=["business_connection", "business_message", "edited_business_message", "deleted_business_messages"],
+            allowed_updates=[
+                "message", "callback_query", "business_connection", "business_message",
+                "edited_business_message", "deleted_business_messages",
+            ],
         )
 
 
