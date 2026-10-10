@@ -94,7 +94,8 @@ def init_db() -> None:
             );
             CREATE TABLE IF NOT EXISTS bot_assets (
                 name TEXT PRIMARY KEY,
-                file_id TEXT NOT NULL
+                file_id TEXT NOT NULL,
+                caption TEXT NOT NULL DEFAULT ''
             );
             """
         )
@@ -106,6 +107,9 @@ def init_db() -> None:
             connection.execute("ALTER TABLE messages ADD COLUMN media_type TEXT")
         if "media_file_id" not in columns:
             connection.execute("ALTER TABLE messages ADD COLUMN media_file_id TEXT")
+        asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(bot_assets)")}
+        if "caption" not in asset_columns:
+            connection.execute("ALTER TABLE bot_assets ADD COLUMN caption TEXT NOT NULL DEFAULT ''")
         connection.commit()
 
 
@@ -157,12 +161,20 @@ def get_asset(name: str) -> str:
     return row[0] if row else ""
 
 
-def save_asset(name: str, file_id: str) -> None:
+def get_asset_caption(name: str) -> str:
+    with closing(db()) as connection:
+        row = connection.execute(
+            "SELECT caption FROM bot_assets WHERE name=?", (name,)
+        ).fetchone()
+    return row[0] if row else ""
+
+
+def save_asset(name: str, file_id: str, caption: str = "") -> None:
     with closing(db()) as connection:
         connection.execute(
-            "INSERT INTO bot_assets(name, file_id) VALUES (?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET file_id=excluded.file_id",
-            (name, file_id),
+            "INSERT INTO bot_assets(name, file_id, caption) VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET file_id=excluded.file_id, caption=excluded.caption",
+            (name, file_id, caption),
         )
         connection.commit()
 
@@ -223,8 +235,9 @@ async def send_home(chat_id: int) -> None:
         "при наличии доступа к ним."
     )
     welcome_photo = get_asset("welcome")
+    welcome_caption = get_asset_caption("welcome") or text
     if welcome_photo:
-        await bot.send_photo(chat_id, welcome_photo, caption=text,
+        await bot.send_photo(chat_id, welcome_photo, caption=welcome_caption,
                              reply_markup=menu_keyboard())
     else:
         await bot.send_message(chat_id, text, reply_markup=menu_keyboard())
@@ -248,7 +261,12 @@ async def on_asset_photo(message: Message) -> None:
         asset_name, label = "instruction", "фото-инструкция"
     else:
         return
-    save_asset(asset_name, message.photo[-1].file_id)
+    custom_caption = caption
+    for marker in ("welcome", "приветствие", "инструкция", "instruction", "setup"):
+        if custom_caption.startswith(marker):
+            custom_caption = custom_caption[len(marker):].lstrip(" :\n—-")
+            break
+    save_asset(asset_name, message.photo[-1].file_id, custom_caption)
     await message.answer(f"✅ Сохранено: {label}")
 
 
@@ -272,8 +290,7 @@ async def menu_setup(callback: CallbackQuery) -> None:
     )
     setup_photo = get_asset("instruction")
     if setup_photo:
-        await bot.send_photo(callback.from_user.id, setup_photo,
-                             caption=text)
+        await bot.send_photo(callback.from_user.id, setup_photo)
     elif SETUP_VIDEO_FILE_ID:
         await bot.send_video(callback.from_user.id, SETUP_VIDEO_FILE_ID, caption=text)
     else:
