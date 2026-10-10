@@ -577,7 +577,6 @@ async def menu_home(callback: CallbackQuery) -> None:
         await callback.message.edit_text(
             "🛡 Главное меню бота:", reply_markup=menu_keyboard()
         )
-    await callback.answer()
 
 
 
@@ -610,7 +609,6 @@ async def menu_setup(callback: CallbackQuery) -> None:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]))
-    await callback.answer()
 
 
 
@@ -628,7 +626,6 @@ async def menu_support(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]),
     )
-    await callback.answer()
 
 
 
@@ -654,7 +651,6 @@ async def menu_demo(callback: CallbackQuery) -> None:
                 [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
             ]),
         )
-    await callback.answer()
 
 
 
@@ -675,7 +671,6 @@ async def menu_settings(callback: CallbackQuery) -> None:
         await bot.send_message(callback.from_user.id, text, reply_markup=markup)
     else:
         await callback.message.edit_text(text, reply_markup=markup)
-    await callback.answer()
 
 
 
@@ -693,14 +688,12 @@ async def toggle_setting(callback: CallbackQuery) -> None:
         "old_media", "archive_enabled",
     }
     if field not in allowed:
-        await callback.answer("Неизвестная настройка", show_alert=True)
         return
     settings = owner_settings(callback.from_user.id)
     set_owner_setting(callback.from_user.id, field, 0 if settings[field] else 1)
     await callback.message.edit_reply_markup(
         reply_markup=settings_keyboard(owner_settings(callback.from_user.id))
     )
-    await callback.answer("Настройка обновлена")
                     
 
 
@@ -721,7 +714,6 @@ async def menu_archive(callback: CallbackQuery) -> None:
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]),
     )
-    await callback.answer()
 
 
 
@@ -739,7 +731,6 @@ async def menu_retention(callback: CallbackQuery) -> None:
         f"🗄 Срок хранения\n\nТекущий срок: {current}",
         reply_markup=retention_keyboard(settings),
     )
-    await callback.answer()
 
 
 
@@ -757,7 +748,6 @@ async def set_retention(callback: CallbackQuery) -> None:
         f"🗄 Срок хранения установлен: {'без ограничений' if not days else f'{days} дней'}",
         reply_markup=retention_keyboard(owner_settings(callback.from_user.id)),
     )
-    await callback.answer("Срок хранения обновлён")
 
 
 
