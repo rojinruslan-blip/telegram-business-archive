@@ -913,23 +913,27 @@ async def on_business_message(message: Message) -> None:
     media_type, media_file_id = extract_media(source)
     timer_media = is_timer_media(source)
     source_message_id = source.message_id
-    # Save the row before downloading: a view-once deletion can race the download.
+    # Save both IDs before downloading. For a reply to view-once media,
+    # Telegram can send the deletion update for the reply ID instead of the
+    # nested media ID. Either key must restore the same saved copy.
+    message_ids = {source_message_id, message.message_id}
     with closing(db()) as database:
-        database.execute(
-            """INSERT INTO messages
-               (business_connection_id, chat_id, message_id, sender_name, sender_id,
-                text, media_type, media_file_id, media_bytes, message_date, is_deleted)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-               ON CONFLICT(business_connection_id, chat_id, message_id) DO UPDATE SET
-                 sender_name=excluded.sender_name, sender_id=excluded.sender_id,
-                 text=excluded.text, media_type=excluded.media_type,
-                 media_file_id=excluded.media_file_id, media_bytes=excluded.media_bytes,
-                 message_date=excluded.message_date,
-                 is_deleted=0""",
-            (message.business_connection_id, message.chat.id, source_message_id,
-             sender, sender_id, text, media_type, media_file_id, None,
-             message.date.isoformat()),
-        )
+        for archive_message_id in message_ids:
+            database.execute(
+                """INSERT INTO messages
+                   (business_connection_id, chat_id, message_id, sender_name, sender_id,
+                    text, media_type, media_file_id, media_bytes, message_date, is_deleted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                   ON CONFLICT(business_connection_id, chat_id, message_id) DO UPDATE SET
+                     sender_name=excluded.sender_name, sender_id=excluded.sender_id,
+                     text=excluded.text, media_type=excluded.media_type,
+                     media_file_id=excluded.media_file_id, media_bytes=excluded.media_bytes,
+                     message_date=excluded.message_date,
+                     is_deleted=0""",
+                (message.business_connection_id, message.chat.id, archive_message_id,
+                 sender, sender_id, text, media_type, media_file_id, None,
+                 message.date.isoformat()),
+            )
         database.commit()
     logger.info(
         "Business message captured: message=%s source_message=%s content_type=%s "
@@ -940,10 +944,12 @@ async def on_business_message(message: Message) -> None:
     if media_file_id:
         media_bytes = await download_media(media_file_id)
         with closing(db()) as database:
+            placeholders = ",".join("?" for _ in message_ids)
             database.execute(
-                """UPDATE messages SET media_bytes=?
-                   WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
-                (media_bytes, message.business_connection_id, message.chat.id, source_message_id),
+                f"""UPDATE messages SET media_bytes=?
+                   WHERE business_connection_id=? AND chat_id=?
+                     AND message_id IN ({placeholders})""",
+                (media_bytes, message.business_connection_id, message.chat.id, *message_ids),
             )
             database.commit()
         logger.info(
