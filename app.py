@@ -19,6 +19,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    MessageEntity,
     Update,
 )
 from dotenv import load_dotenv
@@ -95,7 +96,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS bot_assets (
                 name TEXT PRIMARY KEY,
                 file_id TEXT NOT NULL,
-                caption TEXT NOT NULL DEFAULT ''
+                caption TEXT NOT NULL DEFAULT '',
+                caption_entities TEXT NOT NULL DEFAULT '[]'
             );
             """
         )
@@ -110,6 +112,10 @@ def init_db() -> None:
         asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(bot_assets)")}
         if "caption" not in asset_columns:
             connection.execute("ALTER TABLE bot_assets ADD COLUMN caption TEXT NOT NULL DEFAULT ''")
+        if "caption_entities" not in asset_columns:
+            connection.execute(
+                "ALTER TABLE bot_assets ADD COLUMN caption_entities TEXT NOT NULL DEFAULT '[]'"
+            )
         connection.commit()
 
 
@@ -169,12 +175,31 @@ def get_asset_caption(name: str) -> str:
     return row[0] if row else ""
 
 
-def save_asset(name: str, file_id: str, caption: str = "") -> None:
+def get_asset_caption_entities(name: str) -> list[MessageEntity]:
+    with closing(db()) as connection:
+        row = connection.execute(
+            "SELECT caption_entities FROM bot_assets WHERE name=?", (name,)
+        ).fetchone()
+    if not row or not row[0]:
+        return []
+    return [MessageEntity.model_validate(entity) for entity in json.loads(row[0])]
+
+
+def save_asset(
+    name: str,
+    file_id: str,
+    caption: str = "",
+    caption_entities: Optional[list[MessageEntity]] = None,
+) -> None:
+    entities_json = json.dumps(
+        [entity.model_dump(mode="json") for entity in (caption_entities or [])]
+    )
     with closing(db()) as connection:
         connection.execute(
-            "INSERT INTO bot_assets(name, file_id, caption) VALUES (?, ?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET file_id=excluded.file_id, caption=excluded.caption",
-            (name, file_id, caption),
+            "INSERT INTO bot_assets(name, file_id, caption, caption_entities) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET file_id=excluded.file_id, caption=excluded.caption, "
+            "caption_entities=excluded.caption_entities",
+            (name, file_id, caption, entities_json),
         )
         connection.commit()
 
@@ -236,9 +261,15 @@ async def send_home(chat_id: int) -> None:
     )
     welcome_photo = get_asset("welcome")
     welcome_caption = get_asset_caption("welcome") or text
+    welcome_caption_entities = get_asset_caption_entities("welcome")
     if welcome_photo:
-        await bot.send_photo(chat_id, welcome_photo, caption=welcome_caption,
-                             reply_markup=menu_keyboard())
+        await bot.send_photo(
+            chat_id,
+            welcome_photo,
+            caption=welcome_caption,
+            caption_entities=welcome_caption_entities or None,
+            reply_markup=menu_keyboard(),
+        )
     else:
         await bot.send_message(chat_id, text, reply_markup=menu_keyboard())
 
@@ -275,7 +306,21 @@ async def on_asset_photo(message: Message) -> None:
     custom_caption = raw_caption[len(matched_marker):].lstrip(" :\n—-")
     if asset_name == "instruction":
         custom_caption = ""
-    save_asset(asset_name, message.photo[-1].file_id, custom_caption)
+    removed_prefix = raw_caption[:len(raw_caption) - len(custom_caption)]
+    removed_utf16_length = len(removed_prefix.encode("utf-16-le")) // 2
+    caption_entities = [
+        entity.model_copy(update={"offset": entity.offset - removed_utf16_length})
+        for entity in (message.caption_entities or [])
+        if entity.offset >= removed_utf16_length
+    ]
+    if asset_name == "instruction":
+        caption_entities = []
+    save_asset(
+        asset_name,
+        message.photo[-1].file_id,
+        custom_caption,
+        caption_entities,
+    )
     await message.answer(f"✅ Сохранено: {label}")
 
 
