@@ -1254,12 +1254,20 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     if not owner_settings(owner["owner_chat_id"])["notify_deletions"]:
         return
     pending_rows = [row for row in rows if not row["notification_sent"]]
-    if pending_rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
+    # A full chat deletion is delivered as one batch of message IDs.  Keep a
+    # visible notice even when every row was already sent through the
+    # disappearing-media fast path, and use the archived text as a backup.
+    if len(rows) >= 2:
+        logger.info(
+            "Business chat deletion batch: connection=%s chat=%s deleted=%s archived=%s",
+            event.business_connection_id, event.chat.id, len(deleted_ids), len(rows),
+        )
         await bot.send_message(
             owner["owner_chat_id"],
-            f"🗂 В чате удалено сообщений: {len(pending_rows)}. Сохранённые копии — ниже.",
+            f"🗑 Чат очищен\nСохранено сообщений: {len(rows)}.",
         )
-        await send_mass_delete_backup(owner["owner_chat_id"], pending_rows, event.chat.id)
+        if pending_rows:
+            await send_mass_delete_backup(owner["owner_chat_id"], pending_rows, event.chat.id)
     for row in pending_rows:
         await send_deleted_message(owner["owner_chat_id"], row)
 
