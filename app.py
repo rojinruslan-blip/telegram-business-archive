@@ -219,10 +219,20 @@ def archive_stats(owner_chat_id: int) -> tuple[int, int]:
 def menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🟢 Подключить", url="tg://settings"),
-            InlineKeyboardButton(text="🔴 Инструкция", callback_data="menu:tutorial"),
+            InlineKeyboardButton(
+                text="🛡 Подключить", url="tg://settings", style="success"
+            ),
+            InlineKeyboardButton(
+                text="⚙️ Инструкция", callback_data="menu:tutorial", style="danger"
+            ),
         ],
     ])
+
+
+def back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home", style="primary")
+    ]])
 
 
 def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
@@ -326,9 +336,12 @@ async def on_asset_photo(message: Message) -> None:
 
 @router.callback_query(F.data == "menu:home")
 async def menu_home(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
-        "🛡 Главное меню бота:", reply_markup=menu_keyboard()
-    )
+    if callback.message.photo:
+        await callback.message.delete()
+    else:
+        await callback.message.edit_text(
+            "🛡 Главное меню бота:", reply_markup=menu_keyboard()
+        )
     await callback.answer()
 
 
@@ -344,7 +357,9 @@ async def menu_setup(callback: CallbackQuery) -> None:
     )
     setup_photo = get_asset("instruction")
     if setup_photo:
-        await bot.send_photo(callback.from_user.id, setup_photo)
+        await bot.send_photo(
+            callback.from_user.id, setup_photo, reply_markup=back_keyboard()
+        )
     elif SETUP_VIDEO_FILE_ID:
         await bot.send_video(callback.from_user.id, SETUP_VIDEO_FILE_ID, caption=text)
     else:
