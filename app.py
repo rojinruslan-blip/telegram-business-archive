@@ -473,17 +473,42 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     await ensure_connection(event.business_connection_id)
     placeholders = ",".join("?" for _ in deleted_ids)
     with closing(db()) as database:
+        matched_by_connection_only = False
         rows = database.execute(
             f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
                        message_date FROM messages
                 WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
         ).fetchall()
-        database.execute(
-            f"""UPDATE messages SET is_deleted=1
-                WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})""",
-            [event.business_connection_id, event.chat.id, *deleted_ids],
-        )
+        if not rows:
+            # В некоторых Business updates Telegram может прислать другой chat_id,
+            # хотя connection_id и message_id остаются теми же. Не теряем архив:
+            # резервно ищем сообщение в рамках конкретного подключения.
+            rows = database.execute(
+                f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
+                           message_date FROM messages
+                    WHERE business_connection_id=? AND message_id IN ({placeholders})""",
+                [event.business_connection_id, *deleted_ids],
+            ).fetchall()
+            if rows:
+                matched_by_connection_only = True
+                logger.warning(
+                    "Deleted message matched by connection and message_id only: "
+                    "connection=%s event_chat=%s ids=%s",
+                    event.business_connection_id, event.chat.id, deleted_ids,
+                )
+        if matched_by_connection_only:
+            database.execute(
+                f"""UPDATE messages SET is_deleted=1
+                    WHERE business_connection_id=? AND message_id IN ({placeholders})""",
+                [event.business_connection_id, *deleted_ids],
+            )
+        else:
+            database.execute(
+                f"""UPDATE messages SET is_deleted=1
+                    WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})""",
+                [event.business_connection_id, event.chat.id, *deleted_ids],
+            )
         owner = database.execute(
             "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
             (event.business_connection_id,),
