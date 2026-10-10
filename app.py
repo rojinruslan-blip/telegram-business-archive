@@ -40,7 +40,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/messages.sqlite3"))
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 SETUP_VIDEO_FILE_ID = os.environ.get("SETUP_VIDEO_FILE_ID", "")
 DEMO_VIDEO_FILE_ID = os.environ.get("DEMO_VIDEO_FILE_ID", "")
 WELCOME_PHOTO_FILE_ID = os.environ.get("WELCOME_PHOTO_FILE_ID", "")
@@ -81,7 +83,28 @@ app = FastAPI(title="Telegram Business message archive")
 MASS_DELETE_THRESHOLD = int(os.environ.get("MASS_DELETE_THRESHOLD", "10"))
 
 
-def db() -> sqlite3.Connection:
+class PostgresConnection:
+    """Keeps the SQLite-style queries usable with Render Postgres."""
+
+    def __init__(self, url: str) -> None:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        self.connection = psycopg.connect(url, row_factory=dict_row)
+
+    def execute(self, query: str, params: tuple | list = ()):
+        return self.connection.execute(query.replace("?", "%s"), params)
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def close(self) -> None:
+        self.connection.close()
+
+
+def db() -> sqlite3.Connection | PostgresConnection:
+    if DATABASE_URL:
+        return PostgresConnection(DATABASE_URL)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     return connection
@@ -89,8 +112,7 @@ def db() -> sqlite3.Connection:
 
 def init_db() -> None:
     with closing(db()) as connection:
-        connection.executescript(
-            """
+        schema = """
             CREATE TABLE IF NOT EXISTS connections (
                 business_connection_id TEXT PRIMARY KEY,
                 owner_chat_id INTEGER NOT NULL,
@@ -125,8 +147,16 @@ def init_db() -> None:
                 caption TEXT NOT NULL DEFAULT '',
                 caption_entities TEXT NOT NULL DEFAULT '[]'
             );
-            """
-        )
+        """
+        if DATABASE_URL:
+            for statement in schema.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+        else:
+            connection.executescript(schema)
+        if DATABASE_URL:
+            connection.commit()
+            return
         # Безопасная миграция уже созданной SQLite-базы.
         columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
         if "sender_id" not in columns:
@@ -148,7 +178,7 @@ def init_db() -> None:
 def ensure_owner_settings(owner_chat_id: int) -> None:
     with closing(db()) as connection:
         connection.execute(
-            "INSERT OR IGNORE INTO owner_settings(owner_chat_id) VALUES (?)",
+            "INSERT INTO owner_settings(owner_chat_id) VALUES (?) ON CONFLICT(owner_chat_id) DO NOTHING",
             (owner_chat_id,),
         )
         connection.commit()
@@ -193,7 +223,7 @@ def get_asset(name: str) -> str:
     # Render's free filesystem is temporary and is cleared on a deploy.  The
     # versioned image is the durable fallback; a photo sent to the bot or an
     # environment variable can still override it.
-    return row[0] if row else DEFAULT_ASSETS.get(name, "")
+    return row["file_id"] if row else DEFAULT_ASSETS.get(name, "")
 
 
 def get_asset_caption(name: str) -> str:
@@ -201,7 +231,7 @@ def get_asset_caption(name: str) -> str:
         row = connection.execute(
             "SELECT caption FROM bot_assets WHERE name=?", (name,)
         ).fetchone()
-    return row[0] if row else DEFAULT_ASSET_CAPTIONS.get(name, "")
+    return row["caption"] if row else DEFAULT_ASSET_CAPTIONS.get(name, "")
 
 
 def get_asset_caption_entities(name: str) -> list[MessageEntity]:
@@ -209,9 +239,9 @@ def get_asset_caption_entities(name: str) -> list[MessageEntity]:
         row = connection.execute(
             "SELECT caption_entities FROM bot_assets WHERE name=?", (name,)
         ).fetchone()
-    if not row or not row[0]:
+    if not row or not row["caption_entities"]:
         return []
-    return [MessageEntity.model_validate(entity) for entity in json.loads(row[0])]
+    return [MessageEntity.model_validate(entity) for entity in json.loads(row["caption_entities"])]
 
 
 def save_asset(
@@ -549,7 +579,7 @@ async def on_business_message(message: Message) -> None:
             "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
             (message.business_connection_id,),
         ).fetchone()
-    if owner and not owner_settings(owner[0])["archive_enabled"]:
+    if owner and not owner_settings(owner["owner_chat_id"])["archive_enabled"]:
         return
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
@@ -557,10 +587,15 @@ async def on_business_message(message: Message) -> None:
     media_type, media_file_id = extract_media(message)
     with closing(db()) as database:
         database.execute(
-            """INSERT OR REPLACE INTO messages
+            """INSERT INTO messages
                (business_connection_id, chat_id, message_id, sender_name, sender_id,
                 text, media_type, media_file_id, message_date, is_deleted)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+               ON CONFLICT(business_connection_id, chat_id, message_id) DO UPDATE SET
+                 sender_name=excluded.sender_name, sender_id=excluded.sender_id,
+                 text=excluded.text, media_type=excluded.media_type,
+                 media_file_id=excluded.media_file_id, message_date=excluded.message_date,
+                 is_deleted=0""",
             (message.business_connection_id, message.chat.id, message.message_id,
              sender, sender_id, text, media_type, media_file_id, message.date.isoformat()),
         )
@@ -585,12 +620,12 @@ async def on_edited_business_message(message: Message) -> None:
             (message.business_connection_id,),
         ).fetchone()
         database.commit()
-    if owner and owner_settings(owner[0])["notify_edits"]:
+    if owner and owner_settings(owner["owner_chat_id"])["notify_edits"]:
         reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={sender_id}")
         ]])
         await bot.send_message(
-            owner[0],
+            owner["owner_chat_id"],
             f"✏️ Сообщение изменено\nОт: {sender}\n\n{text}",
             reply_markup=reply_markup,
         )
@@ -676,7 +711,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         rows = database.execute(
             f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
                        message_date FROM messages
-                WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})""",
+                WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})
+                  AND is_deleted=0""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
         ).fetchall()
         if not rows:
@@ -686,7 +722,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
             rows = database.execute(
                 f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
                            message_date FROM messages
-                    WHERE business_connection_id=? AND message_id IN ({placeholders})""",
+                    WHERE business_connection_id=? AND message_id IN ({placeholders})
+                      AND is_deleted=0""",
                 [event.business_connection_id, *deleted_ids],
             ).fetchall()
             if rows:
@@ -715,19 +752,20 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         database.commit()
     if not owner:
         return
-    if not owner_settings(owner[0])["notify_deletions"]:
+    # Telegram can retry a deletion update while a deploy is switching over.
+    # A message already marked as deleted must never be sent twice.
+    if not rows:
+        return
+    if not owner_settings(owner["owner_chat_id"])["notify_deletions"]:
         return
     if rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
         await bot.send_message(
-            owner[0],
+            owner["owner_chat_id"],
             f"🗂 В чате удалено сообщений: {len(rows)}. Сохранённые копии — ниже.",
         )
-        await send_mass_delete_backup(owner[0], rows, event.chat.id)
-    if rows:
-        for row in rows:
-            await send_deleted_message(owner[0], row)
-    else:
-        await bot.send_message(owner[0], "🗑 Сообщение удалено, но копия не была сохранена.")
+        await send_mass_delete_backup(owner["owner_chat_id"], rows, event.chat.id)
+    for row in rows:
+        await send_deleted_message(owner["owner_chat_id"], row)
 
 
 @app.get("/")
