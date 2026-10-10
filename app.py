@@ -879,7 +879,9 @@ async def on_business_message(message: Message) -> None:
     sender_id = message.from_user.id if message.from_user else message.chat.id
     text = message.text or message.caption or f"[{message.content_type}]"
     media_type, media_file_id = extract_media(message)
-    media_bytes = await download_media(media_file_id)
+    # Save the message row before downloading the file.  A disappearing
+    # message can generate its deletion update while the file download is
+    # still in progress; inserting first lets that update find the archive.
     with closing(db()) as database:
         database.execute(
             """INSERT INTO messages
@@ -893,16 +895,27 @@ async def on_business_message(message: Message) -> None:
                  message_date=excluded.message_date,
                  is_deleted=0""",
             (message.business_connection_id, message.chat.id, message.message_id,
-             sender, sender_id, text, media_type, media_file_id, media_bytes,
+             sender, sender_id, text, media_type, media_file_id, None,
              message.date.isoformat()),
         )
         database.commit()
-
-
-
-
-
-
+    logger.info(
+        "Business message captured: message=%s content_type=%s media_type=%s has_file_id=%s",
+        message.message_id, message.content_type, media_type, bool(media_file_id),
+    )
+    if media_file_id:
+        media_bytes = await download_media(media_file_id)
+        with closing(db()) as database:
+            database.execute(
+                """UPDATE messages SET media_bytes=?
+                   WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+                (media_bytes, message.business_connection_id, message.chat.id, message.message_id),
+            )
+            database.commit()
+        logger.info(
+            "Business media copy saved: message=%s media_type=%s bytes=%s",
+            message.message_id, media_type, len(media_bytes) if media_bytes else 0,
+        )
 
 
 @router.edited_business_message()
@@ -1000,6 +1013,20 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
     media_type = row["media_type"]
     media_file_id = row["media_file_id"]
     media_bytes = row["media_bytes"]
+    if media_type and not media_bytes and row["business_connection_id"]:
+        # The deletion update may arrive before the background download has
+        # finished.  Give the capture task a short window to commit the copy.
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            with closing(db()) as database:
+                fresh = database.execute(
+                    """SELECT media_bytes FROM messages
+                       WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+                    (row["business_connection_id"], row["chat_id"], row["message_id"]),
+                ).fetchone()
+            if fresh and fresh["media_bytes"]:
+                media_bytes = fresh["media_bytes"]
+                break
     if not media_type or (not media_file_id and not media_bytes):
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
         return
@@ -1060,8 +1087,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     with closing(db()) as database:
         matched_by_connection_only = False
         rows = database.execute(
-            f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
-                       media_bytes, message_date FROM messages
+            f"""SELECT business_connection_id, chat_id, message_id, sender_name, sender_id,
+                       text, media_type, media_file_id, media_bytes, message_date FROM messages
                 WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})
                   AND is_deleted=0""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
@@ -1071,8 +1098,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
             # хотя connection_id и message_id остаются теми же. Не теряем архив:
             # резервно ищем сообщение в рамках конкретного подключения.
             rows = database.execute(
-                f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
-                           media_bytes, message_date FROM messages
+                f"""SELECT business_connection_id, chat_id, message_id, sender_name, sender_id,
+                           text, media_type, media_file_id, media_bytes, message_date FROM messages
                     WHERE business_connection_id=? AND message_id IN ({placeholders})
                       AND is_deleted=0""",
                 [event.business_connection_id, *deleted_ids],
