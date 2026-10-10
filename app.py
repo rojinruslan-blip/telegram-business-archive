@@ -42,6 +42,9 @@ DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/messages.sqlite3"))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 SETUP_VIDEO_FILE_ID = os.environ.get("SETUP_VIDEO_FILE_ID", "")
 DEMO_VIDEO_FILE_ID = os.environ.get("DEMO_VIDEO_FILE_ID", "")
+WELCOME_PHOTO_FILE_ID = os.environ.get("WELCOME_PHOTO_FILE_ID", "")
+SETUP_PHOTO_FILE_ID = os.environ.get("SETUP_PHOTO_FILE_ID", "")
+CHAT_AUTOMATION_USERNAME = os.environ.get("CHAT_AUTOMATION_USERNAME", "@Undelink_bot")
 
 bot = Bot(BOT_TOKEN)
 dispatcher = Dispatcher()
@@ -88,6 +91,10 @@ def init_db() -> None:
                 old_media INTEGER NOT NULL DEFAULT 0,
                 archive_enabled INTEGER NOT NULL DEFAULT 1,
                 retention_days INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS bot_assets (
+                name TEXT PRIMARY KEY,
+                file_id TEXT NOT NULL
             );
             """
         )
@@ -136,6 +143,30 @@ def set_owner_setting(owner_chat_id: int, field: str, value: int) -> None:
         connection.commit()
 
 
+def get_asset(name: str) -> str:
+    configured = {
+        "welcome": WELCOME_PHOTO_FILE_ID,
+        "instruction": SETUP_PHOTO_FILE_ID,
+    }.get(name, "")
+    if configured:
+        return configured
+    with closing(db()) as connection:
+        row = connection.execute(
+            "SELECT file_id FROM bot_assets WHERE name=?", (name,)
+        ).fetchone()
+    return row[0] if row else ""
+
+
+def save_asset(name: str, file_id: str) -> None:
+    with closing(db()) as connection:
+        connection.execute(
+            "INSERT INTO bot_assets(name, file_id) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET file_id=excluded.file_id",
+            (name, file_id),
+        )
+        connection.commit()
+
+
 def archive_stats(owner_chat_id: int) -> tuple[int, int]:
     with closing(db()) as connection:
         row = connection.execute(
@@ -151,12 +182,9 @@ def archive_stats(owner_chat_id: int) -> tuple[int, int]:
 def menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="⏻ Подключить", url="tg://settings/business"),
-            InlineKeyboardButton(text="⚙️ Туториал", callback_data="menu:tutorial"),
+            InlineKeyboardButton(text="🟢 Подключить", url="tg://settings"),
+            InlineKeyboardButton(text="🔴 Инструкция", callback_data="menu:tutorial"),
         ],
-        [InlineKeyboardButton(text="🖼 Демонстрация работы бота", callback_data="menu:demo")],
-        [InlineKeyboardButton(text="🔔 Уведомления", callback_data="menu:settings")],
-        [InlineKeyboardButton(text="👥 Поддержка", callback_data="menu:support")],
     ])
 
 
@@ -186,18 +214,42 @@ def retention_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
 
 
 async def send_home(chat_id: int) -> None:
-    await bot.send_message(
-        chat_id,
-        "🛡 Здесь можно настроить сохранение удалённых и изменённых сообщений.\n\n"
-        "Подключите бота к Telegram Business, а нужные уведомления настройте в меню ниже.",
-        reply_markup=menu_keyboard(),
+    text = (
+        "🛡 Этот бот сохраняет удалённые и изменённые сообщения в чатах.\n\n"
+        "Для подключения откройте настройки Telegram → Изменить → "
+        "Автоматизация чатов и добавьте бота.\n"
+        f"Введите: {CHAT_AUTOMATION_USERNAME}\n\n"
+        "После подключения бот будет сохранять входящие и исходящие сообщения "
+        "при наличии доступа к ним."
     )
+    welcome_photo = get_asset("welcome")
+    if welcome_photo:
+        await bot.send_photo(chat_id, welcome_photo, caption=text,
+                             reply_markup=menu_keyboard())
+    else:
+        await bot.send_message(chat_id, text, reply_markup=menu_keyboard())
 
 
 @router.message(CommandStart())
 async def on_start(message: Message) -> None:
     ensure_owner_settings(message.from_user.id)
     await send_home(message.chat.id)
+
+
+@router.message(F.photo)
+async def on_asset_photo(message: Message) -> None:
+    """Save photos sent to the bot with Welcome/Инструкция captions."""
+    if message.chat.type != "private" or not message.photo:
+        return
+    caption = (message.caption or "").strip().lower()
+    if caption in {"welcome", "приветствие"}:
+        asset_name, label = "welcome", "приветственное фото"
+    elif caption in {"инструкция", "instruction", "setup"}:
+        asset_name, label = "instruction", "фото-инструкция"
+    else:
+        return
+    save_asset(asset_name, message.photo[-1].file_id)
+    await message.answer(f"✅ Сохранено: {label}")
 
 
 @router.callback_query(F.data == "menu:home")
@@ -211,14 +263,18 @@ async def menu_home(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.in_({"menu:setup", "menu:tutorial"}))
 async def menu_setup(callback: CallbackQuery) -> None:
     text = (
-        "❓ Как подключить?\n\n"
+        "❓ Как подключить бота\n\n"
         "1. Откройте настройки Telegram.\n"
-        "2. Перейдите в раздел Telegram Business.\n"
-        "3. Откройте подключённых ботов и добавьте этого бота.\n"
-        "4. Разрешите доступ к сообщениям и уведомлениям об изменениях.\n\n"
-        "Видео-инструкция будет добавлена сюда."
+        "2. Нажмите «Изменить».\n"
+        "3. Откройте «Автоматизация чатов».\n"
+        f"4. Введите {CHAT_AUTOMATION_USERNAME} и выберите этого бота.\n"
+        "5. Разрешите доступ к сообщениям, изменениям и удалениям."
     )
-    if SETUP_VIDEO_FILE_ID:
+    setup_photo = get_asset("instruction")
+    if setup_photo:
+        await bot.send_photo(callback.from_user.id, setup_photo,
+                             caption=text)
+    elif SETUP_VIDEO_FILE_ID:
         await bot.send_video(callback.from_user.id, SETUP_VIDEO_FILE_ID, caption=text)
     else:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
