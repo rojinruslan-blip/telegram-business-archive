@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import asyncio
 import io
 import json
@@ -9,6 +10,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Optional
+
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
@@ -26,16 +28,20 @@ from aiogram.types import (
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("telegram-business-archive")
 
+
 load_dotenv()
+
 
 # Python 3.9 вместе с uvloop может не создать event loop автоматически.
 try:
     asyncio.get_event_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
+
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
@@ -76,6 +82,7 @@ DEFAULT_ASSET_CAPTIONS = {
     "instruction": "",
 }
 
+
 bot = Bot(BOT_TOKEN)
 dispatcher = Dispatcher()
 router = Router()
@@ -84,23 +91,32 @@ app = FastAPI(title="Telegram Business message archive")
 MASS_DELETE_THRESHOLD = int(os.environ.get("MASS_DELETE_THRESHOLD", "10"))
 
 
+
+
 class PostgresConnection:
     """Keeps the SQLite-style queries usable with Render Postgres."""
+
 
     def __init__(self, url: str) -> None:
         import psycopg
         from psycopg.rows import dict_row
 
+
         self.connection = psycopg.connect(url, row_factory=dict_row)
+
 
     def execute(self, query: str, params: tuple | list = ()):
         return self.connection.execute(query.replace("?", "%s"), params)
 
+
     def commit(self) -> None:
         self.connection.commit()
 
+
     def close(self) -> None:
         self.connection.close()
+
+
 
 
 def db() -> sqlite3.Connection | PostgresConnection:
@@ -109,6 +125,8 @@ def db() -> sqlite3.Connection | PostgresConnection:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     return connection
+
+
 
 
 def init_db() -> None:
@@ -192,6 +210,8 @@ def init_db() -> None:
         connection.commit()
 
 
+
+
 def ensure_owner_settings(owner_chat_id: int) -> None:
     with closing(db()) as connection:
         connection.execute(
@@ -201,6 +221,8 @@ def ensure_owner_settings(owner_chat_id: int) -> None:
         connection.commit()
 
 
+
+
 def owner_settings(owner_chat_id: int) -> sqlite3.Row:
     ensure_owner_settings(owner_chat_id)
     with closing(db()) as connection:
@@ -208,6 +230,8 @@ def owner_settings(owner_chat_id: int) -> sqlite3.Row:
             "SELECT * FROM owner_settings WHERE owner_chat_id=?",
             (owner_chat_id,),
         ).fetchone()
+
+
 
 
 def set_owner_setting(owner_chat_id: int, field: str, value: int) -> None:
@@ -224,6 +248,8 @@ def set_owner_setting(owner_chat_id: int, field: str, value: int) -> None:
             (value, owner_chat_id),
         )
         connection.commit()
+
+
 
 
 def get_asset(name: str) -> str:
@@ -243,12 +269,16 @@ def get_asset(name: str) -> str:
     return row["file_id"] if row else DEFAULT_ASSETS.get(name, "")
 
 
+
+
 def get_asset_caption(name: str) -> str:
     with closing(db()) as connection:
         row = connection.execute(
             "SELECT caption FROM bot_assets WHERE name=?", (name,)
         ).fetchone()
     return row["caption"] if row else DEFAULT_ASSET_CAPTIONS.get(name, "")
+
+
 
 
 def get_asset_caption_entities(name: str) -> list[MessageEntity]:
@@ -259,6 +289,8 @@ def get_asset_caption_entities(name: str) -> list[MessageEntity]:
     if not row or not row["caption_entities"]:
         return []
     return [MessageEntity.model_validate(entity) for entity in json.loads(row["caption_entities"])]
+
+
 
 
 def save_asset(
@@ -280,6 +312,8 @@ def save_asset(
         connection.commit()
 
 
+
+
 def archive_stats(owner_chat_id: int) -> tuple[int, int]:
     with closing(db()) as connection:
         row = connection.execute(
@@ -290,6 +324,8 @@ def archive_stats(owner_chat_id: int) -> tuple[int, int]:
             (owner_chat_id,),
         ).fetchone()
     return int(row["total"]), int(row["deleted"])
+
+
 
 
 def menu_keyboard() -> InlineKeyboardMarkup:
@@ -308,10 +344,14 @@ def menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+
+
 def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home", style="primary")
     ]])
+
+
 
 
 def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
@@ -328,6 +368,8 @@ def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
     ])
 
 
+
+
 def retention_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
     current = "без ограничений" if not settings["retention_days"] else f"{settings['retention_days']} дн."
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -337,6 +379,8 @@ def retention_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="Без ограничений", callback_data="retention:0")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:settings")],
     ])
+
+
 
 
 async def send_home(chat_id: int) -> None:
@@ -363,10 +407,14 @@ async def send_home(chat_id: int) -> None:
         await bot.send_message(chat_id, text, reply_markup=menu_keyboard())
 
 
+
+
 @router.message(CommandStart())
 async def on_start(message: Message) -> None:
     ensure_owner_settings(message.from_user.id)
     await send_home(message.chat.id)
+
+
 
 
 @router.message(F.photo)
@@ -409,6 +457,8 @@ async def on_asset_photo(message: Message) -> None:
     await message.answer(f"✅ Сохранено: {label}")
 
 
+
+
 @router.callback_query(F.data == "menu:home")
 async def menu_home(callback: CallbackQuery) -> None:
     if callback.message.photo:
@@ -418,6 +468,7 @@ async def menu_home(callback: CallbackQuery) -> None:
             "🛡 Главное меню бота:", reply_markup=menu_keyboard()
         )
     await callback.answer()
+
 
 @router.callback_query(F.data.in_({"menu:setup", "menu:tutorial"}))
 async def menu_setup(callback: CallbackQuery) -> None:
@@ -449,6 +500,8 @@ async def menu_setup(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+
+
 @router.callback_query(F.data == "menu:support")
 async def menu_support(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
@@ -458,6 +511,8 @@ async def menu_support(callback: CallbackQuery) -> None:
         ]),
     )
     await callback.answer()
+
+
 
 
 @router.callback_query(F.data == "menu:demo")
@@ -479,6 +534,8 @@ async def menu_demo(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+
+
 @router.callback_query(F.data == "menu:settings")
 async def menu_settings(callback: CallbackQuery) -> None:
     text = (
@@ -491,6 +548,8 @@ async def menu_settings(callback: CallbackQuery) -> None:
     else:
         await callback.message.edit_text(text, reply_markup=markup)
     await callback.answer()
+
+
 
 
 @router.callback_query(F.data.startswith("toggle:"))
@@ -512,6 +571,8 @@ async def toggle_setting(callback: CallbackQuery) -> None:
                     
 
 
+
+
 @router.callback_query(F.data == "menu:archive")
 async def menu_archive(callback: CallbackQuery) -> None:
     total, deleted = archive_stats(callback.from_user.id)
@@ -525,6 +586,8 @@ async def menu_archive(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+
+
 @router.callback_query(F.data == "menu:retention")
 async def menu_retention(callback: CallbackQuery) -> None:
     settings = owner_settings(callback.from_user.id)
@@ -536,6 +599,8 @@ async def menu_retention(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+
+
 @router.callback_query(F.data.startswith("retention:"))
 async def set_retention(callback: CallbackQuery) -> None:
     days = int(callback.data.split(":", 1)[1])
@@ -545,6 +610,8 @@ async def set_retention(callback: CallbackQuery) -> None:
         reply_markup=retention_keyboard(owner_settings(callback.from_user.id)),
     )
     await callback.answer("Срок хранения обновлён")
+
+
 
 
 def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
@@ -566,6 +633,8 @@ def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+
+
 async def download_media(file_id: Optional[str]) -> Optional[bytes]:
     """Save a copy before Telegram temporary media/file_id expires."""
     if not file_id:
@@ -578,6 +647,8 @@ async def download_media(file_id: Optional[str]) -> Optional[bytes]:
     except Exception:
         logger.exception("Could not download media file_id=%s", file_id)
         return None
+
+
 
 
 async def ensure_connection(connection_id: str) -> None:
@@ -596,6 +667,8 @@ async def ensure_connection(connection_id: str) -> None:
     ensure_owner_settings(connection.user_chat_id)
 
 
+
+
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection) -> None:
     logger.info("Business connection update: id=%s enabled=%s", connection.id, connection.is_enabled)
@@ -610,6 +683,8 @@ async def on_business_connection(connection: BusinessConnection) -> None:
         )
         database.commit()
     ensure_owner_settings(connection.user_chat_id)
+
+
 
 
 @router.business_message()
@@ -656,6 +731,8 @@ async def on_business_message(message: Message) -> None:
         database.commit()
 
 
+
+
 @router.edited_business_message()
 async def on_edited_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
@@ -685,6 +762,8 @@ async def on_edited_business_message(message: Message) -> None:
         )
 
 
+
+
 def build_chat_backup(rows: list[sqlite3.Row]) -> bytes:
     """Create a readable transcript of messages removed from a chat."""
     lines = ["Удалённые сообщения", ""]
@@ -693,6 +772,8 @@ def build_chat_backup(rows: list[sqlite3.Row]) -> bytes:
         body = row["text"] or "[без текста]"
         lines.extend((f"{row['sender_name'] or 'Неизвестный отправитель'}{media}", body, ""))
     return "\n".join(lines).encode("utf-8")
+
+
 
 
 async def send_mass_delete_backup(owner_chat_id: int, rows: list[sqlite3.Row], chat_id: int) -> None:
@@ -710,12 +791,16 @@ async def send_mass_delete_backup(owner_chat_id: int, rows: list[sqlite3.Row], c
     )
 
 
+
+
 def deleted_message_markup(row: sqlite3.Row) -> Optional[InlineKeyboardMarkup]:
     if not row["sender_id"]:
         return None
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={row['sender_id']}")
     ]])
+
+
 
 
 async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
@@ -734,6 +819,7 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
         BufferedInputFile(media_bytes, filename=f"restored_{row['message_id']}")
         if media_bytes else media_file_id
     )
+
 
     # Telegram captions are limited to 1024 characters for media.
     caption = caption[:1024]
@@ -754,6 +840,8 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
         await bot.send_video_note(owner_chat_id, media_source)
     else:
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
+
+
 
 
 @router.deleted_business_messages()
@@ -833,9 +921,13 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         await send_deleted_message(owner["owner_chat_id"], row)
 
 
+
+
 @app.get("/")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
 
 
 @app.post("/telegram/webhook")
@@ -847,14 +939,17 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
     return {"ok": True}
 
 
+
+
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
-        try:
+    try:
         await bot.set_my_short_description(short_description=BOT_SHORT_DESCRIPTION)
         await bot.set_my_description(description=BOT_DESCRIPTION)
-        except Exception:
+    except Exception:
         logger.exception("Could not update bot profile description")
+
 
     if WEBHOOK_URL:
         await bot.set_webhook(
@@ -865,6 +960,8 @@ async def startup() -> None:
                 "edited_business_message", "deleted_business_messages",
             ],
         )
+
+
 
 
 @app.on_event("shutdown")
