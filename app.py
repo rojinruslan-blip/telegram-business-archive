@@ -1,4 +1,5 @@
-from __future__ import annotations
+f118
+rom __future__ import annotations
 
 import asyncio
 import json
@@ -115,15 +116,15 @@ def init_db() -> None:
         schema = """
             CREATE TABLE IF NOT EXISTS connections (
                 business_connection_id TEXT PRIMARY KEY,
-                owner_chat_id INTEGER NOT NULL,
+                owner_chat_id BIGINT NOT NULL,
                 is_enabled INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS messages (
                 business_connection_id TEXT NOT NULL,
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
                 sender_name TEXT,
-                sender_id INTEGER,
+                sender_id BIGINT,
                 text TEXT,
                 media_type TEXT,
                 media_file_id TEXT,
@@ -132,7 +133,7 @@ def init_db() -> None:
                 PRIMARY KEY (business_connection_id, chat_id, message_id)
             );
             CREATE TABLE IF NOT EXISTS owner_settings (
-                owner_chat_id INTEGER PRIMARY KEY,
+                owner_chat_id BIGINT PRIMARY KEY,
                 notify_edits INTEGER NOT NULL DEFAULT 1,
                 notify_deletions INTEGER NOT NULL DEFAULT 1,
                 media_timers INTEGER NOT NULL DEFAULT 1,
@@ -155,6 +156,18 @@ def init_db() -> None:
         else:
             connection.executescript(schema)
         if DATABASE_URL:
+            # Telegram chat/user IDs exceed PostgreSQL INTEGER (32-bit).
+            # Upgrade databases created by the first Postgres migration too.
+            for table, column in (
+                ("connections", "owner_chat_id"),
+                ("messages", "chat_id"),
+                ("messages", "message_id"),
+                ("messages", "sender_id"),
+                ("owner_settings", "owner_chat_id"),
+            ):
+                connection.execute(
+                    f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"
+                )
             connection.commit()
             return
         # Безопасная миграция уже созданной SQLite-базы.
@@ -399,7 +412,6 @@ async def menu_home(callback: CallbackQuery) -> None:
         )
     await callback.answer()
 
-
 @router.callback_query(F.data.in_({"menu:setup", "menu:tutorial"}))
 async def menu_setup(callback: CallbackQuery) -> None:
     text = (
@@ -478,7 +490,7 @@ async def toggle_setting(callback: CallbackQuery) -> None:
     await callback.message.edit_reply_markup(
         reply_markup=settings_keyboard(owner_settings(callback.from_user.id))
     )
-    await callback.answer("Настройка обновлена")
+                    
 
 
 @router.callback_query(F.data == "menu:archive")
