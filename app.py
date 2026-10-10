@@ -150,11 +150,13 @@ def archive_stats(owner_chat_id: int) -> tuple[int, int]:
 
 def menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❓ Как подключить?", callback_data="menu:setup")],
+        [
+            InlineKeyboardButton(text="⏻ Подключить", url="tg://settings/business"),
+            InlineKeyboardButton(text="⚙️ Туториал", callback_data="menu:tutorial"),
+        ],
         [InlineKeyboardButton(text="🖼 Демонстрация работы бота", callback_data="menu:demo")],
-        [InlineKeyboardButton(text="🔔 Настройки уведомлений", callback_data="menu:settings")],
-        [InlineKeyboardButton(text="🗃 Архив", callback_data="menu:archive")],
-        [InlineKeyboardButton(text="🗄 Срок хранения", callback_data="menu:retention")],
+        [InlineKeyboardButton(text="🔔 Уведомления", callback_data="menu:settings")],
+        [InlineKeyboardButton(text="👥 Поддержка", callback_data="menu:support")],
     ])
 
 
@@ -164,9 +166,9 @@ def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"✏️ Изменения {mark('notify_edits')}", callback_data="toggle:notify_edits")],
         [InlineKeyboardButton(text=f"🗑 Удаления {mark('notify_deletions')}", callback_data="toggle:notify_deletions")],
         [InlineKeyboardButton(text=f"📸 Медиа с таймером {mark('media_timers')}", callback_data="toggle:media_timers")],
-        [InlineKeyboardButton(text=f"🕵️ Инкогнито {mark('incognito')}", callback_data="toggle:incognito")],
-        [InlineKeyboardButton(text=f"📅 Старое медиа {mark('old_media')}", callback_data="toggle:old_media")],
-        [InlineKeyboardButton(text=f"🗃 Архив {mark('archive_enabled')}", callback_data="toggle:archive_enabled")],
+        [InlineKeyboardButton(text="🥷 Инкогнито", callback_data="toggle:incognito")],
+        [InlineKeyboardButton(text="📅 Старое медиа", callback_data="toggle:old_media")],
+        [InlineKeyboardButton(text="🗃 Архив", callback_data="toggle:archive_enabled")],
         [InlineKeyboardButton(text="🗄 Срок хранения", callback_data="menu:retention")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")],
     ])
@@ -206,7 +208,7 @@ async def menu_home(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "menu:setup")
+@router.callback_query(F.data.in_({"menu:setup", "menu:tutorial"}))
 async def menu_setup(callback: CallbackQuery) -> None:
     text = (
         "❓ Как подключить?\n\n"
@@ -222,6 +224,17 @@ async def menu_setup(callback: CallbackQuery) -> None:
         await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
         ]))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:support")
+async def menu_support(callback: CallbackQuery) -> None:
+    await callback.message.edit_text(
+        "👥 Поддержка\n\nСвяжитесь с владельцем бота, если нужна помощь с подключением.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")]
+        ]),
+    )
     await callback.answer()
 
 
