@@ -254,18 +254,27 @@ async def on_asset_photo(message: Message) -> None:
     """Save photos sent to the bot with Welcome/Инструкция captions."""
     if message.chat.type != "private" or not message.photo:
         return
-    caption = (message.caption or "").strip().lower()
-    if caption in {"welcome", "приветствие"}:
-        asset_name, label = "welcome", "приветственное фото"
-    elif caption in {"инструкция", "instruction", "setup"}:
-        asset_name, label = "instruction", "фото-инструкция"
-    else:
+    raw_caption = (message.caption or "").strip()
+    normalized_caption = raw_caption.casefold()
+    markers = {
+        "welcome": ("welcome", "приветственное фото"),
+        "приветствие": ("welcome", "приветственное фото"),
+        "инструкция": ("instruction", "фото-инструкция"),
+        "instruction": ("instruction", "фото-инструкция"),
+        "setup": ("instruction", "фото-инструкция"),
+    }
+    matched_marker = next(
+        (marker for marker in markers
+         if normalized_caption == marker
+         or normalized_caption.startswith((marker + " ", marker + ":", marker + "\n", marker + "—"))),
+        None,
+    )
+    if not matched_marker:
         return
-    custom_caption = caption
-    for marker in ("welcome", "приветствие", "инструкция", "instruction", "setup"):
-        if custom_caption.startswith(marker):
-            custom_caption = custom_caption[len(marker):].lstrip(" :\n—-")
-            break
+    asset_name, label = markers[matched_marker]
+    custom_caption = raw_caption[len(matched_marker):].lstrip(" :\n—-")
+    if asset_name == "instruction":
+        custom_caption = ""
     save_asset(asset_name, message.photo[-1].file_id, custom_caption)
     await message.answer(f"✅ Сохранено: {label}")
 
