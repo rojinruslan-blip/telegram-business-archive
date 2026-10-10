@@ -231,7 +231,7 @@ def menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="🛡 Подключить", url="tg://settings", style="success"
+                text="🛡 Подключить", url="tg://settings/edit", style="success"
             ),
             InlineKeyboardButton(
                 text="⚙️ Инструкция", callback_data="menu:tutorial", style="danger"
