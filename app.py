@@ -449,10 +449,6 @@ def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"✏️ Изменения {mark('notify_edits')}", callback_data="toggle:notify_edits")],
         [InlineKeyboardButton(text=f"🗑 Удаления {mark('notify_deletions')}", callback_data="toggle:notify_deletions")],
         [InlineKeyboardButton(text=f"📸 Медиа с таймером {mark('media_timers')}", callback_data="toggle:media_timers")],
-        [InlineKeyboardButton(text=f"🥷 Инкогнито {mark('incognito')}", callback_data="toggle:incognito")],
-        [InlineKeyboardButton(text=f"📅 Старое медиа {mark('old_media')}", callback_data="toggle:old_media")],
-        [InlineKeyboardButton(text=f"🗃 Архив {mark('archive_enabled')}", callback_data="toggle:archive_enabled")],
-        [InlineKeyboardButton(text="🗄 Срок хранения", callback_data="menu:retention")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")],
     ])
 
