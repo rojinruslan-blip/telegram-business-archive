@@ -1054,19 +1054,7 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
     media_type = row["media_type"]
     media_file_id = row["media_file_id"]
     media_bytes = row["media_bytes"]
-    if media_type and not media_bytes and row["business_connection_id"]:
-        for _ in range(8):
-            await asyncio.sleep(0.25)
-            with closing(db()) as database:
-                fresh = database.execute(
-                    """SELECT media_bytes FROM messages
-                       WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
-                    (row["business_connection_id"], row["chat_id"], row["message_id"]),
-                ).fetchone()
-            if fresh and fresh["media_bytes"]:
-                media_bytes = fresh["media_bytes"]
-                break
-    if not media_type or (not media_file_id and not media_bytes):
+    if not media_type:
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
         return
     caption = caption[:1024]
@@ -1088,18 +1076,33 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
             await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
             await bot.send_video_note(owner_chat_id, source)
 
-    # Reuse Telegram's file_id first: this is much faster than uploading bytes.
-    # The stored copy remains the fallback for expired media.
+    # Reuse Telegram's file_id first: this avoids waiting for the stored copy.
     if media_file_id:
         try:
             await send_media(media_file_id)
             return
         except Exception:
             logger.warning("Telegram file_id expired; using stored media copy", exc_info=True)
+    # If the file_id has expired, give the background download a short window
+    # to commit the durable copy before falling back to a text-only notice.
+    if not media_bytes and row["business_connection_id"]:
+        for _ in range(8):
+            await asyncio.sleep(0.25)
+            with closing(db()) as database:
+                fresh = database.execute(
+                    """SELECT media_bytes FROM messages
+                       WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+                    (row["business_connection_id"], row["chat_id"], row["message_id"]),
+                ).fetchone()
+            if fresh and fresh["media_bytes"]:
+                media_bytes = fresh["media_bytes"]
+                break
     if media_bytes:
         await send_media(
             BufferedInputFile(media_bytes, filename=f"restored_{row['message_id']}")
         )
+    else:
+        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
 
 
 
