@@ -596,44 +596,70 @@ async def on_edited_business_message(message: Message) -> None:
         )
 
 
-def build_chat_backup(rows: list[sqlite3.Row], connection_id: str, chat_id: int) -> bytes:
-    """Serialize deleted messages into one portable backup file."""
-    backup = {
-        "format": "telegram-business-archive",
-        "version": 1,
-        "business_connection_id": connection_id,
-        "chat_id": chat_id,
-        "message_count": len(rows),
-        "messages": [
-            {
-                "message_id": row["message_id"],
-                "sender_name": row["sender_name"],
-                "sender_id": row["sender_id"],
-                "text": row["text"],
-                "media_type": row["media_type"],
-                "media_file_id": row["media_file_id"],
-                "message_date": row["message_date"],
-            }
-            for row in sorted(rows, key=lambda item: item["message_id"])
-        ],
-    }
-    return json.dumps(backup, ensure_ascii=False, indent=2).encode("utf-8")
+def build_chat_backup(rows: list[sqlite3.Row]) -> bytes:
+    """Create a readable transcript of messages removed from a chat."""
+    lines = ["Удалённые сообщения", ""]
+    for row in sorted(rows, key=lambda item: item["message_id"]):
+        media = f" [{row['media_type']}]" if row["media_type"] else ""
+        body = row["text"] or "[без текста]"
+        lines.extend((f"{row['sender_name'] or 'Неизвестный отправитель'}{media}", body, ""))
+    return "\n".join(lines).encode("utf-8")
 
 
-async def send_mass_delete_backup(owner_chat_id: int, rows: list[sqlite3.Row],
-                                  connection_id: str, chat_id: int) -> None:
-    backup = build_chat_backup(rows, connection_id, chat_id)
-    filename = f"chat_{chat_id}_backup.json"
+async def send_mass_delete_backup(owner_chat_id: int, rows: list[sqlite3.Row], chat_id: int) -> None:
+    backup = build_chat_backup(rows)
+    filename = f"chat_{chat_id}_history.txt"
     document = BufferedInputFile(backup, filename=filename)
     await bot.send_document(
         owner_chat_id,
         document=document,
         caption=(
-            f"🗂 Резервная копия удалённого чата\n"
+            f"🗂 История удалённых сообщений\n"
             f"Сообщений: {len(rows)}\n"
-            "Текст и данные медиа сохранены в одном JSON-файле."
+            "Текст сообщений сохранён в читаемом файле. Медиа отправлены отдельными сообщениями."
         ),
     )
+
+
+def deleted_message_markup(row: sqlite3.Row) -> Optional[InlineKeyboardMarkup]:
+    if not row["sender_id"]:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={row['sender_id']}")
+    ]])
+
+
+async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
+    """Send the saved message back, including media that later expired or was deleted."""
+    reply_markup = deleted_message_markup(row)
+    header = f"🗑 Сообщение удалено\nОт: {row['sender_name'] or 'Неизвестный отправитель'}"
+    body = row["text"] or ""
+    caption = f"{header}\n\n{body}".strip()
+    media_type = row["media_type"]
+    media_file_id = row["media_file_id"]
+    if not media_type or not media_file_id:
+        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
+        return
+
+    # Telegram captions are limited to 1024 characters for media.
+    caption = caption[:1024]
+    if media_type == "voice":
+        await bot.send_voice(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+    elif media_type == "photo":
+        await bot.send_photo(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+    elif media_type == "video":
+        await bot.send_video(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+    elif media_type == "audio":
+        await bot.send_audio(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+    elif media_type == "document":
+        await bot.send_document(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+    elif media_type == "animation":
+        await bot.send_animation(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+    elif media_type == "video_note":
+        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
+        await bot.send_video_note(owner_chat_id, media_file_id)
+    else:
+        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
 
 
 @router.deleted_business_messages()
@@ -692,51 +718,14 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
     if not owner_settings(owner[0])["notify_deletions"]:
         return
     if rows and len(deleted_ids) >= MASS_DELETE_THRESHOLD:
-        await send_mass_delete_backup(
-            owner[0], rows, event.business_connection_id, event.chat.id
+        await bot.send_message(
+            owner[0],
+            f"🗂 В чате удалено сообщений: {len(rows)}. Сохранённые копии — ниже.",
         )
-    elif rows:
+        await send_mass_delete_backup(owner[0], rows, event.chat.id)
+    if rows:
         for row in rows:
-            reply_markup = None
-            if row["sender_id"]:
-                reply_markup = InlineKeyboardMarkup(
-                    inline_keyboard=[[
-                        InlineKeyboardButton(
-                            text="Открыть чат",
-                            url=f"tg://user?id={row['sender_id']}",
-                        )
-                    ]]
-                )
-            header = (
-                f"🗑 Сообщение удалено\nОт: {row['sender_name']}"
-            )
-            body = row["text"] or ""
-            caption = f"{header}\n\n{body}".strip()
-            media_type = row["media_type"]
-            media_file_id = row["media_file_id"]
-            if not media_type or not media_file_id:
-                await bot.send_message(owner[0], caption, reply_markup=reply_markup)
-                continue
-
-            # Telegram captions are limited to 1024 characters for media.
-            caption = caption[:1024]
-            if media_type == "voice":
-                await bot.send_voice(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
-            elif media_type == "photo":
-                await bot.send_photo(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
-            elif media_type == "video":
-                await bot.send_video(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
-            elif media_type == "audio":
-                await bot.send_audio(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
-            elif media_type == "document":
-                await bot.send_document(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
-            elif media_type == "animation":
-                await bot.send_animation(owner[0], media_file_id, caption=caption, reply_markup=reply_markup)
-            elif media_type == "video_note":
-                await bot.send_message(owner[0], caption, reply_markup=reply_markup)
-                await bot.send_video_note(owner[0], media_file_id)
-            else:
-                await bot.send_message(owner[0], caption, reply_markup=reply_markup)
+            await send_deleted_message(owner[0], row)
     else:
         await bot.send_message(owner[0], "🗑 Сообщение удалено, но копия не была сохранена.")
 
