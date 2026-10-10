@@ -46,6 +46,14 @@ DEMO_VIDEO_FILE_ID = os.environ.get("DEMO_VIDEO_FILE_ID", "")
 WELCOME_PHOTO_FILE_ID = os.environ.get("WELCOME_PHOTO_FILE_ID", "")
 SETUP_PHOTO_FILE_ID = os.environ.get("SETUP_PHOTO_FILE_ID", "")
 CHAT_AUTOMATION_USERNAME = os.environ.get("CHAT_AUTOMATION_USERNAME", "@Undelink_bot")
+ASSET_BASE_URL = os.environ.get(
+    "ASSET_BASE_URL",
+    "https://raw.githubusercontent.com/rojinruslan-blip/telegram-business-archive/main",
+).rstrip("/")
+DEFAULT_ASSETS = {
+    "welcome": f"{ASSET_BASE_URL}/codex-clipboard-78758548-3c2f-4d60-9628-58ec986ea201.png",
+    "instruction": f"{ASSET_BASE_URL}/codex-clipboard-bdbc7038-cd27-4da9-b761-c750e1841129.png",
+}
 
 bot = Bot(BOT_TOKEN)
 dispatcher = Dispatcher()
@@ -164,7 +172,10 @@ def get_asset(name: str) -> str:
         row = connection.execute(
             "SELECT file_id FROM bot_assets WHERE name=?", (name,)
         ).fetchone()
-    return row[0] if row else ""
+    # Render's free filesystem is temporary and is cleared on a deploy.  The
+    # versioned image is the durable fallback; a photo sent to the bot or an
+    # environment variable can still override it.
+    return row[0] if row else DEFAULT_ASSETS.get(name, "")
 
 
 def get_asset_caption(name: str) -> str:
