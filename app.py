@@ -1137,15 +1137,9 @@ async def send_deleted_message(
             await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
             await bot.send_video_note(owner_chat_id, source)
 
-    # Reuse Telegram's file_id first: this avoids waiting for the stored copy.
-    if media_file_id:
-        try:
-            await send_media(media_file_id)
-            return
-        except Exception:
-            logger.warning("Telegram file_id expired; using stored media copy", exc_info=True)
-    # If the file_id has expired, give the background download a short window
-    # to commit the durable copy before falling back to a text-only notice.
+    # Prefer the durable copy. Telegram marks view-once uploads as
+    # SelfDestructingPhoto/Video and rejects their temporary file_id when it
+    # is sent back through send_photo/send_video.
     if not media_bytes and row["business_connection_id"]:
         for _ in range(8):
             await asyncio.sleep(0.25)
@@ -1159,11 +1153,28 @@ async def send_deleted_message(
                 media_bytes = fresh["media_bytes"]
                 break
     if media_bytes:
-        await send_media(
-            BufferedInputFile(media_bytes, filename=f"restored_{row['message_id']}")
-        )
-    else:
-        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
+        extensions = {
+            "photo": "jpg",
+            "video": "mp4",
+            "voice": "ogg",
+            "audio": "mp3",
+            "document": "bin",
+            "animation": "mp4",
+            "video_note": "mp4",
+        }
+        filename = f"restored_{row['message_id']}.{extensions.get(media_type, 'bin')}"
+        try:
+            await send_media(BufferedInputFile(media_bytes, filename=filename))
+            return
+        except Exception:
+            logger.warning("Stored media copy could not be sent; trying Telegram file_id", exc_info=True)
+    if media_file_id:
+        try:
+            await send_media(media_file_id)
+            return
+        except Exception:
+            logger.warning("Telegram file_id could not be sent", exc_info=True)
+    await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
 
 
 def mark_notification_sent(connection_id: str, chat_id: int, message_ids: set[int]) -> None:
