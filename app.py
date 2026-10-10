@@ -325,8 +325,6 @@ async def on_asset_photo(message: Message) -> None:
         return
     asset_name, label = markers[matched_marker]
     custom_caption = raw_caption[len(matched_marker):].lstrip(" :\n—-")
-    if asset_name == "instruction":
-        custom_caption = ""
     removed_prefix = raw_caption[:len(raw_caption) - len(custom_caption)]
     removed_utf16_length = len(removed_prefix.encode("utf-16-le")) // 2
     caption_entities = [
@@ -334,8 +332,6 @@ async def on_asset_photo(message: Message) -> None:
         for entity in (message.caption_entities or [])
         if entity.offset >= removed_utf16_length
     ]
-    if asset_name == "instruction":
-        caption_entities = []
     save_asset(
         asset_name,
         message.photo[-1].file_id,
@@ -367,9 +363,15 @@ async def menu_setup(callback: CallbackQuery) -> None:
         "5. Разрешите доступ к сообщениям, изменениям и удалениям."
     )
     setup_photo = get_asset("instruction")
+    setup_caption = get_asset_caption("instruction")
+    setup_caption_entities = get_asset_caption_entities("instruction")
     if setup_photo:
         await bot.send_photo(
-            callback.from_user.id, setup_photo, reply_markup=back_keyboard()
+            callback.from_user.id,
+            setup_photo,
+            caption=setup_caption or None,
+            caption_entities=setup_caption_entities or None,
+            reply_markup=back_keyboard(),
         )
     elif SETUP_VIDEO_FILE_ID:
         await bot.send_video(callback.from_user.id, SETUP_VIDEO_FILE_ID, caption=text)
