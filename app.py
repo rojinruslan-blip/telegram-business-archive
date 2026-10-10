@@ -766,6 +766,26 @@ async def set_retention(callback: CallbackQuery) -> None:
 
 
 
+def _extra_has_timer_marker(value: object) -> bool:
+    """Read view-once markers even when aiogram does not model the field yet."""
+    extra = getattr(value, "model_extra", None) or {}
+    return any(
+        key in extra and extra[key] not in (None, False, 0)
+        for key in ("view_once", "is_view_once", "ttl_seconds", "ttl_period")
+    )
+
+
+def is_timer_media(message: Message) -> bool:
+    media_items = [message]
+    for attribute in ("photo", "video", "audio", "document", "animation", "voice", "video_note"):
+        value = getattr(message, attribute, None)
+        if isinstance(value, list):
+            media_items.extend(value)
+        elif value:
+            media_items.append(value)
+    return any(_extra_has_timer_marker(item) for item in media_items)
+
+
 def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
     """Return the Telegram file type and reusable file_id for a message."""
     if message.voice:
@@ -789,6 +809,17 @@ def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
 
 
 
+
+
+def media_source(message: Message) -> Message:
+    """Use the replied-to message when Telegram nests view-once media there."""
+    if extract_media(message) != (None, None):
+        return message
+    for attribute in ("reply_to_message", "external_reply"):
+        candidate = getattr(message, attribute, None)
+        if candidate and extract_media(candidate) != (None, None):
+            return candidate
+    return message
 
 
 async def download_media(file_id: Optional[str]) -> Optional[bytes]:
@@ -875,13 +906,14 @@ async def on_business_message(message: Message) -> None:
             ).fetchone()
     if owner and not owner_settings(owner["owner_chat_id"])["archive_enabled"]:
         return
-    sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
-    sender_id = message.from_user.id if message.from_user else message.chat.id
-    text = message.text or message.caption or f"[{message.content_type}]"
-    media_type, media_file_id = extract_media(message)
-    # Save the message row before downloading the file.  A disappearing
-    # message can generate its deletion update while the file download is
-    # still in progress; inserting first lets that update find the archive.
+    source = media_source(message)
+    sender = source.from_user.full_name if source.from_user else "Неизвестный отправитель"
+    sender_id = source.from_user.id if source.from_user else message.chat.id
+    text = source.text or source.caption or f"[{source.content_type}]"
+    media_type, media_file_id = extract_media(source)
+    timer_media = is_timer_media(source)
+    source_message_id = source.message_id
+    # Save the row before downloading: a view-once deletion can race the download.
     with closing(db()) as database:
         database.execute(
             """INSERT INTO messages
@@ -894,14 +926,16 @@ async def on_business_message(message: Message) -> None:
                  media_file_id=excluded.media_file_id, media_bytes=excluded.media_bytes,
                  message_date=excluded.message_date,
                  is_deleted=0""",
-            (message.business_connection_id, message.chat.id, message.message_id,
+            (message.business_connection_id, message.chat.id, source_message_id,
              sender, sender_id, text, media_type, media_file_id, None,
              message.date.isoformat()),
         )
         database.commit()
     logger.info(
-        "Business message captured: message=%s content_type=%s media_type=%s has_file_id=%s",
-        message.message_id, message.content_type, media_type, bool(media_file_id),
+        "Business message captured: message=%s source_message=%s content_type=%s "
+        "media_type=%s timer_media=%s has_file_id=%s",
+        message.message_id, source_message_id, source.content_type, media_type,
+        timer_media, bool(media_file_id),
     )
     if media_file_id:
         media_bytes = await download_media(media_file_id)
@@ -909,12 +943,12 @@ async def on_business_message(message: Message) -> None:
             database.execute(
                 """UPDATE messages SET media_bytes=?
                    WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
-                (media_bytes, message.business_connection_id, message.chat.id, message.message_id),
+                (media_bytes, message.business_connection_id, message.chat.id, source_message_id),
             )
             database.commit()
         logger.info(
-            "Business media copy saved: message=%s media_type=%s bytes=%s",
-            message.message_id, media_type, len(media_bytes) if media_bytes else 0,
+            "Business media copy saved: message=%s media_type=%s timer_media=%s bytes=%s",
+            source_message_id, media_type, timer_media, len(media_bytes) if media_bytes else 0,
         )
 
 
@@ -1014,8 +1048,6 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
     media_file_id = row["media_file_id"]
     media_bytes = row["media_bytes"]
     if media_type and not media_bytes and row["business_connection_id"]:
-        # The deletion update may arrive before the background download has
-        # finished.  Give the capture task a short window to commit the copy.
         for _ in range(8):
             await asyncio.sleep(0.25)
             with closing(db()) as database:
