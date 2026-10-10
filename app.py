@@ -297,6 +297,9 @@ def menu_keyboard() -> InlineKeyboardMarkup:
                 text="⚙️ Инструкция", callback_data="menu:tutorial", style="danger"
             ),
         ],
+        [InlineKeyboardButton(
+            text="🔔 Уведомления", callback_data="menu:settings", style="primary"
+        )],
     ])
 
 
@@ -312,9 +315,9 @@ def settings_keyboard(settings: sqlite3.Row) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"✏️ Изменения {mark('notify_edits')}", callback_data="toggle:notify_edits")],
         [InlineKeyboardButton(text=f"🗑 Удаления {mark('notify_deletions')}", callback_data="toggle:notify_deletions")],
         [InlineKeyboardButton(text=f"📸 Медиа с таймером {mark('media_timers')}", callback_data="toggle:media_timers")],
-        [InlineKeyboardButton(text="🥷 Инкогнито", callback_data="toggle:incognito")],
-        [InlineKeyboardButton(text="📅 Старое медиа", callback_data="toggle:old_media")],
-        [InlineKeyboardButton(text="🗃 Архив", callback_data="toggle:archive_enabled")],
+        [InlineKeyboardButton(text=f"🥷 Инкогнито {mark('incognito')}", callback_data="toggle:incognito")],
+        [InlineKeyboardButton(text=f"📅 Старое медиа {mark('old_media')}", callback_data="toggle:old_media")],
+        [InlineKeyboardButton(text=f"🗃 Архив {mark('archive_enabled')}", callback_data="toggle:archive_enabled")],
         [InlineKeyboardButton(text="🗄 Срок хранения", callback_data="menu:retention")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:home")],
     ])
@@ -484,11 +487,19 @@ async def menu_settings(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("toggle:"))
 async def toggle_setting(callback: CallbackQuery) -> None:
     field = callback.data.split(":", 1)[1]
+    allowed = {
+        "notify_edits", "notify_deletions", "media_timers", "incognito",
+        "old_media", "archive_enabled",
+    }
+    if field not in allowed:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
     settings = owner_settings(callback.from_user.id)
     set_owner_setting(callback.from_user.id, field, 0 if settings[field] else 1)
     await callback.message.edit_reply_markup(
         reply_markup=settings_keyboard(owner_settings(callback.from_user.id))
     )
+    await callback.answer("Настройка обновлена")
                     
 
 
