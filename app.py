@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -127,6 +128,7 @@ def init_db() -> None:
                 text TEXT,
                 media_type TEXT,
                 media_file_id TEXT,
+                media_bytes BYTEA,
                 message_date TEXT,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (business_connection_id, chat_id, message_id)
@@ -167,6 +169,7 @@ def init_db() -> None:
                 connection.execute(
                     f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"
                 )
+            connection.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_bytes BYTEA")
             connection.commit()
             return
         # Безопасная миграция уже созданной SQLite-базы.
@@ -177,6 +180,8 @@ def init_db() -> None:
             connection.execute("ALTER TABLE messages ADD COLUMN media_type TEXT")
         if "media_file_id" not in columns:
             connection.execute("ALTER TABLE messages ADD COLUMN media_file_id TEXT")
+        if "media_bytes" not in columns:
+            connection.execute("ALTER TABLE messages ADD COLUMN media_bytes BLOB")
         asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(bot_assets)")}
         if "caption" not in asset_columns:
             connection.execute("ALTER TABLE bot_assets ADD COLUMN caption TEXT NOT NULL DEFAULT ''")
@@ -561,6 +566,20 @@ def extract_media(message: Message) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+async def download_media(file_id: Optional[str]) -> Optional[bytes]:
+    """Save a copy before Telegram temporary media/file_id expires."""
+    if not file_id:
+        return None
+    try:
+        telegram_file = await bot.get_file(file_id)
+        buffer = io.BytesIO()
+        await bot.download(telegram_file, destination=buffer)
+        return buffer.getvalue()
+    except Exception:
+        logger.exception("Could not download media file_id=%s", file_id)
+        return None
+
+
 async def ensure_connection(connection_id: str) -> None:
     """Восстанавливает владельца после перезапуска Render."""
     connection = await bot.get_business_connection(connection_id)
@@ -599,31 +618,40 @@ async def on_business_message(message: Message) -> None:
         return
     logger.info("Business message update: connection=%s chat=%s message=%s",
                 message.business_connection_id, message.chat.id, message.message_id)
-    await ensure_connection(message.business_connection_id)
     with closing(db()) as database:
         owner = database.execute(
             "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
             (message.business_connection_id,),
         ).fetchone()
+    if not owner:
+        await ensure_connection(message.business_connection_id)
+        with closing(db()) as database:
+            owner = database.execute(
+                "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
+                (message.business_connection_id,),
+            ).fetchone()
     if owner and not owner_settings(owner["owner_chat_id"])["archive_enabled"]:
         return
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     text = message.text or message.caption or f"[{message.content_type}]"
     media_type, media_file_id = extract_media(message)
+    media_bytes = await download_media(media_file_id)
     with closing(db()) as database:
         database.execute(
             """INSERT INTO messages
                (business_connection_id, chat_id, message_id, sender_name, sender_id,
-                text, media_type, media_file_id, message_date, is_deleted)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                text, media_type, media_file_id, media_bytes, message_date, is_deleted)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                ON CONFLICT(business_connection_id, chat_id, message_id) DO UPDATE SET
                  sender_name=excluded.sender_name, sender_id=excluded.sender_id,
                  text=excluded.text, media_type=excluded.media_type,
-                 media_file_id=excluded.media_file_id, message_date=excluded.message_date,
+                 media_file_id=excluded.media_file_id, media_bytes=excluded.media_bytes,
+                 message_date=excluded.message_date,
                  is_deleted=0""",
             (message.business_connection_id, message.chat.id, message.message_id,
-             sender, sender_id, text, media_type, media_file_id, message.date.isoformat()),
+             sender, sender_id, text, media_type, media_file_id, media_bytes,
+             message.date.isoformat()),
         )
         database.commit()
 
@@ -698,14 +726,19 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
     caption = f"{header}\n\n{body}".strip()
     media_type = row["media_type"]
     media_file_id = row["media_file_id"]
-    if not media_type or not media_file_id:
+    media_bytes = row["media_bytes"]
+    if not media_type or (not media_file_id and not media_bytes):
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
         return
+    media_source = (
+        BufferedInputFile(media_bytes, filename=f"restored_{row['message_id']}")
+        if media_bytes else media_file_id
+    )
 
     # Telegram captions are limited to 1024 characters for media.
     caption = caption[:1024]
     if media_type == "voice":
-        await bot.send_voice(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
+        await bot.send_voice(owner_chat_id, media_source, caption=caption, reply_markup=reply_markup)
     elif media_type == "photo":
         await bot.send_photo(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
     elif media_type == "video":
@@ -718,7 +751,7 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
         await bot.send_animation(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
     elif media_type == "video_note":
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
-        await bot.send_video_note(owner_chat_id, media_file_id)
+        await bot.send_video_note(owner_chat_id, media_source)
     else:
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
 
@@ -730,13 +763,19 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
         return
     logger.info("Deleted business messages update: connection=%s chat=%s ids=%s",
                 event.business_connection_id, event.chat.id, deleted_ids)
-    await ensure_connection(event.business_connection_id)
+    with closing(db()) as database:
+        known_connection = database.execute(
+            "SELECT business_connection_id FROM connections WHERE business_connection_id=?",
+            (event.business_connection_id,),
+        ).fetchone()
+    if not known_connection:
+        await ensure_connection(event.business_connection_id)
     placeholders = ",".join("?" for _ in deleted_ids)
     with closing(db()) as database:
         matched_by_connection_only = False
         rows = database.execute(
             f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
-                       message_date FROM messages
+                       media_bytes, message_date FROM messages
                 WHERE business_connection_id=? AND chat_id=? AND message_id IN ({placeholders})
                   AND is_deleted=0""",
             [event.business_connection_id, event.chat.id, *deleted_ids],
@@ -747,7 +786,7 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted) -> None:
             # резервно ищем сообщение в рамках конкретного подключения.
             rows = database.execute(
                 f"""SELECT message_id, sender_name, sender_id, text, media_type, media_file_id,
-                           message_date FROM messages
+                           media_bytes, message_date FROM messages
                     WHERE business_connection_id=? AND message_id IN ({placeholders})
                       AND is_deleted=0""",
                 [event.business_connection_id, *deleted_ids],
