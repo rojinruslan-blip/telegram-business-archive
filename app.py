@@ -54,6 +54,24 @@ DEFAULT_ASSETS = {
     "welcome": f"{ASSET_BASE_URL}/codex-clipboard-78758548-3c2f-4d60-9628-58ec986ea201.png",
     "instruction": f"{ASSET_BASE_URL}/codex-clipboard-bdbc7038-cd27-4da9-b761-c750e1841129.png",
 }
+# Render Free clears the local SQLite file on each deploy.  Keep the default
+# welcome copy in the repository so a deploy never reverts users to the old
+# technical text before they have uploaded another custom banner.
+DEFAULT_ASSET_CAPTIONS = {
+    "welcome": (
+        "🤖 Этот бот поможет тебе видеть:\n\n"
+        "удалённые сообщения 🗑\n"
+        "голосовые сообщения 📣\n"
+        "видеосообщения 👀\n"
+        "фотографии с таймером 💀\n\n"
+        "Быстрый старт:\n"
+        "• Нажми кнопку «Подключить» ниже. Откроется окно редактирования профиля.\n"
+        "• Найди «Автоматизация чатов».\n"
+        "• Введи @Undelink_bot для подключения.\n\n"
+        "Если возникнут проблемы с подключением — нажми «Инструкция»."
+    ),
+    "instruction": "",
+}
 
 bot = Bot(BOT_TOKEN)
 dispatcher = Dispatcher()
@@ -183,7 +201,7 @@ def get_asset_caption(name: str) -> str:
         row = connection.execute(
             "SELECT caption FROM bot_assets WHERE name=?", (name,)
         ).fetchone()
-    return row[0] if row else ""
+    return row[0] if row else DEFAULT_ASSET_CAPTIONS.get(name, "")
 
 
 def get_asset_caption_entities(name: str) -> list[MessageEntity]:
