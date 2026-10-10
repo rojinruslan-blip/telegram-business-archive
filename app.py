@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 import asyncio
+from collections import deque
 import io
 import json
 import logging
@@ -102,6 +103,8 @@ dispatcher = Dispatcher()
 router = Router()
 dispatcher.include_router(router)
 app = FastAPI(title="Telegram Business message archive")
+SEEN_UPDATE_IDS: set[int] = set()
+RECENT_UPDATE_IDS: deque[int] = deque(maxlen=4096)
 MASS_DELETE_THRESHOLD = int(os.environ.get("MASS_DELETE_THRESHOLD", "10"))
 BOT_SHORT_DESCRIPTION = "Восстанавливает удалённые сообщения и медиа."
 BOT_DESCRIPTION = (
@@ -1136,9 +1139,27 @@ async def health() -> dict[str, str]:
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> dict[str, bool]:
     payload = await request.json()
+    update_id = payload.get("update_id")
+    if isinstance(update_id, int):
+        if update_id in SEEN_UPDATE_IDS:
+            logger.info("Ignoring duplicate Telegram update: update_id=%s", update_id)
+            return {"ok": True}
+        if len(RECENT_UPDATE_IDS) == RECENT_UPDATE_IDS.maxlen:
+            SEEN_UPDATE_IDS.discard(RECENT_UPDATE_IDS[0])
+        RECENT_UPDATE_IDS.append(update_id)
+        SEEN_UPDATE_IDS.add(update_id)
     logger.info("Telegram update received: update_id=%s keys=%s",
-                payload.get("update_id"), [key for key in payload if key != "update_id"])
-    await dispatcher.feed_update(bot, Update.model_validate(payload))
+                update_id, [key for key in payload if key != "update_id"])
+
+    async def process_update() -> None:
+        try:
+            await dispatcher.feed_update(bot, Update.model_validate(payload))
+        except Exception:
+            logger.exception("Could not process Telegram update: update_id=%s", update_id)
+
+    # Acknowledge the webhook immediately. Telegram otherwise retries a slow
+    # update, which can send the same /start welcome message twice.
+    asyncio.create_task(process_update())
     return {"ok": True}
 
 
