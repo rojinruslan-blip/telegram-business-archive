@@ -476,11 +476,15 @@ async def menu_demo(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def menu_settings(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(
+    text = (
         "🔔 Настройки уведомлений:\n\n"
-        "Выберите, какие события и материалы нужно получать.",
-        reply_markup=settings_keyboard(owner_settings(callback.from_user.id)),
+        "Выберите, какие события и материалы нужно получать."
     )
+    markup = settings_keyboard(owner_settings(callback.from_user.id))
+    if callback.message.photo:
+        await bot.send_message(callback.from_user.id, text, reply_markup=markup)
+    else:
+        await callback.message.edit_text(text, reply_markup=markup)
     await callback.answer()
 
 
