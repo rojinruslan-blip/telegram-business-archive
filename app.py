@@ -567,6 +567,7 @@ async def on_asset_photo(message: Message) -> None:
 
 @router.callback_query(F.data == "menu:home")
 async def menu_home(callback: CallbackQuery) -> None:
+    await callback.answer()
     if callback.message.photo:
         await callback.message.delete()
     else:
@@ -580,6 +581,7 @@ async def menu_home(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.in_({"menu:setup", "menu:tutorial"}))
 async def menu_setup(callback: CallbackQuery) -> None:
+    await callback.answer()
     text = (
         "❓ Как подключить бота\n\n"
         "1. Откройте настройки Telegram.\n"
@@ -616,6 +618,7 @@ async def menu_setup(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:support")
 async def menu_support(callback: CallbackQuery) -> None:
+    await callback.answer()
     await callback.message.edit_text(
         "👥 Поддержка\n\nСвяжитесь с владельцем бота, если нужна помощь с подключением.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -633,6 +636,7 @@ async def menu_support(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:demo")
 async def menu_demo(callback: CallbackQuery) -> None:
+    await callback.answer()
     if DEMO_VIDEO_FILE_ID:
         await bot.send_video(
             callback.from_user.id,
@@ -658,6 +662,7 @@ async def menu_demo(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def menu_settings(callback: CallbackQuery) -> None:
+    await callback.answer()
     text = (
         "🔔 Настройки уведомлений:\n\n"
         "Выберите, какие события и материалы нужно получать."
@@ -722,6 +727,7 @@ async def menu_archive(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:retention")
 async def menu_retention(callback: CallbackQuery) -> None:
+    await callback.answer()
     settings = owner_settings(callback.from_user.id)
     current = "без ограничений" if not settings["retention_days"] else f"{settings['retention_days']} дней"
     await callback.message.edit_text(
@@ -739,6 +745,7 @@ async def menu_retention(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("retention:"))
 async def set_retention(callback: CallbackQuery) -> None:
+    await callback.answer()
     days = int(callback.data.split(":", 1)[1])
     set_owner_setting(callback.from_user.id, "retention_days", days)
     await callback.message.edit_text(
@@ -991,33 +998,37 @@ async def send_deleted_message(owner_chat_id: int, row: sqlite3.Row) -> None:
     if not media_type or (not media_file_id and not media_bytes):
         await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
         return
-    media_source = (
-        BufferedInputFile(media_bytes, filename=f"restored_{row['message_id']}")
-        if media_bytes else media_file_id
-    )
-
-
-
-
-    # Telegram captions are limited to 1024 characters for media.
     caption = caption[:1024]
-    if media_type == "voice":
-        await bot.send_voice(owner_chat_id, media_source, caption=caption, reply_markup=reply_markup)
-    elif media_type == "photo":
-        await bot.send_photo(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
-    elif media_type == "video":
-        await bot.send_video(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
-    elif media_type == "audio":
-        await bot.send_audio(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
-    elif media_type == "document":
-        await bot.send_document(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
-    elif media_type == "animation":
-        await bot.send_animation(owner_chat_id, media_file_id, caption=caption, reply_markup=reply_markup)
-    elif media_type == "video_note":
-        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
-        await bot.send_video_note(owner_chat_id, media_source)
-    else:
-        await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
+
+    async def send_media(source: str | BufferedInputFile) -> None:
+        if media_type == "voice":
+            await bot.send_voice(owner_chat_id, source, caption=caption, reply_markup=reply_markup)
+        elif media_type == "photo":
+            await bot.send_photo(owner_chat_id, source, caption=caption, reply_markup=reply_markup)
+        elif media_type == "video":
+            await bot.send_video(owner_chat_id, source, caption=caption, reply_markup=reply_markup)
+        elif media_type == "audio":
+            await bot.send_audio(owner_chat_id, source, caption=caption, reply_markup=reply_markup)
+        elif media_type == "document":
+            await bot.send_document(owner_chat_id, source, caption=caption, reply_markup=reply_markup)
+        elif media_type == "animation":
+            await bot.send_animation(owner_chat_id, source, caption=caption, reply_markup=reply_markup)
+        elif media_type == "video_note":
+            await bot.send_message(owner_chat_id, caption, reply_markup=reply_markup)
+            await bot.send_video_note(owner_chat_id, source)
+
+    # Reuse Telegram's file_id first: this is much faster than uploading bytes.
+    # The stored copy remains the fallback for expired media.
+    if media_file_id:
+        try:
+            await send_media(media_file_id)
+            return
+        except Exception:
+            logger.warning("Telegram file_id expired; using stored media copy", exc_info=True)
+    if media_bytes:
+        await send_media(
+            BufferedInputFile(media_bytes, filename=f"restored_{row['message_id']}")
+        )
 
 
 
