@@ -105,6 +105,8 @@ dispatcher.include_router(router)
 app = FastAPI(title="Telegram Business message archive")
 SEEN_UPDATE_IDS: set[int] = set()
 RECENT_UPDATE_IDS: deque[int] = deque(maxlen=4096)
+CONNECTION_OWNER_CACHE: dict[str, int] = {}
+OWNER_SETTINGS_CACHE: dict[int, object] = {}
 MASS_DELETE_THRESHOLD = int(os.environ.get("MASS_DELETE_THRESHOLD", "10"))
 BOT_SHORT_DESCRIPTION = "Восстанавливает удалённые сообщения и медиа."
 BOT_DESCRIPTION = (
@@ -277,12 +279,17 @@ def ensure_owner_settings(owner_chat_id: int) -> None:
 
 
 def owner_settings(owner_chat_id: int) -> sqlite3.Row:
+    cached = OWNER_SETTINGS_CACHE.get(owner_chat_id)
+    if cached is not None:
+        return cached  # type: ignore[return-value]
     ensure_owner_settings(owner_chat_id)
     with closing(db()) as connection:
-        return connection.execute(
+        settings = connection.execute(
             "SELECT * FROM owner_settings WHERE owner_chat_id=?",
             (owner_chat_id,),
         ).fetchone()
+    OWNER_SETTINGS_CACHE[owner_chat_id] = settings
+    return settings
 
 
 
@@ -841,6 +848,7 @@ async def ensure_connection(connection_id: str) -> None:
             (connection.id, connection.user_chat_id, int(connection.is_enabled)),
         )
         database.commit()
+    CONNECTION_OWNER_CACHE[connection.id] = connection.user_chat_id
     ensure_owner_settings(connection.user_chat_id)
 
 
@@ -863,6 +871,7 @@ async def on_business_connection(connection: BusinessConnection) -> None:
             (connection.id, connection.user_chat_id, int(connection.is_enabled)),
         )
         database.commit()
+    CONNECTION_OWNER_CACHE[connection.id] = connection.user_chat_id
     ensure_owner_settings(connection.user_chat_id)
 
 
@@ -878,11 +887,17 @@ async def on_business_message(message: Message) -> None:
         return
     logger.info("Business message update: connection=%s chat=%s message=%s",
                 message.business_connection_id, message.chat.id, message.message_id)
-    with closing(db()) as database:
-        owner = database.execute(
-            "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
-            (message.business_connection_id,),
-        ).fetchone()
+    cached_owner = CONNECTION_OWNER_CACHE.get(message.business_connection_id)
+    if cached_owner is not None:
+        owner = {"owner_chat_id": cached_owner}
+    else:
+        with closing(db()) as database:
+            owner = database.execute(
+                "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
+                (message.business_connection_id,),
+            ).fetchone()
+        if owner:
+            CONNECTION_OWNER_CACHE[message.business_connection_id] = owner["owner_chat_id"]
     if not owner:
         await ensure_connection(message.business_connection_id)
         with closing(db()) as database:
