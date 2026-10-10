@@ -683,6 +683,7 @@ async def menu_settings(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("toggle:"))
 async def toggle_setting(callback: CallbackQuery) -> None:
+    await callback.answer()
     field = callback.data.split(":", 1)[1]
     allowed = {
         "notify_edits", "notify_deletions", "media_timers", "incognito",
@@ -708,6 +709,7 @@ async def toggle_setting(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:archive")
 async def menu_archive(callback: CallbackQuery) -> None:
+    await callback.answer()
     total, deleted = archive_stats(callback.from_user.id)
     await callback.message.edit_text(
         f"🗃 Архив\n\nВсего сохранено сообщений: {total}\nУдалённых сообщений: {deleted}\n\n"
