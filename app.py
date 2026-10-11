@@ -938,14 +938,19 @@ async def on_business_message(message: Message) -> None:
     # still in progress; inserting first lets that update find the archive.
     message_ids = {source_message_id, message.message_id}
     with closing(db()) as database:
-        source_was_already_archived = bool(
-            source_message_id != message.message_id
-            and database.execute(
-                """SELECT 1 FROM messages
+        # A normal photo has already been received as its own message and has
+        # a durable local copy.  A view-once photo can also have a placeholder
+        # row, but without bytes; do not mistake that for an ordinary photo.
+        source_has_durable_copy = False
+        if source_message_id != message.message_id:
+            previous_source = database.execute(
+                """SELECT media_bytes FROM messages
                    WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
                 (message.business_connection_id, message.chat.id, source_message_id),
             ).fetchone()
-        )
+            source_has_durable_copy = bool(
+                previous_source and previous_source["media_bytes"]
+            )
         for archive_message_id in message_ids:
             # For a reply to view-once media Telegram may send the deletion
             # update for the reply ID, not for the nested media ID. Keep both
@@ -993,7 +998,7 @@ async def on_business_message(message: Message) -> None:
     # otherwise replying to an ordinary photo would create an unwanted copy.
     if (
         source_message_id != message.message_id
-        and not source_was_already_archived
+        and not source_has_durable_copy
         and media_type
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
