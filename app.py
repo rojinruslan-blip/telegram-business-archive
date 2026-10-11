@@ -938,6 +938,14 @@ async def on_business_message(message: Message) -> None:
     # still in progress; inserting first lets that update find the archive.
     message_ids = {source_message_id, message.message_id}
     with closing(db()) as database:
+        source_was_already_archived = bool(
+            source_message_id != message.message_id
+            and database.execute(
+                """SELECT 1 FROM messages
+                   WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+                (message.business_connection_id, message.chat.id, source_message_id),
+            ).fetchone()
+        )
         for archive_message_id in message_ids:
             # For a reply to view-once media Telegram may send the deletion
             # update for the reply ID, not for the nested media ID. Keep both
@@ -979,12 +987,13 @@ async def on_business_message(message: Message) -> None:
             "Business media copy saved: message=%s media_type=%s timer_media=%s bytes=%s",
             source_message_id, media_type, timer_media, len(media_bytes) if media_bytes else 0,
         )
-    # Telegram does not reliably emit a deletion update when view-once media
-    # expires.  A media object nested in a reply is the reliable signal that
-    # the user answered a disappearing-media message, so send its durable
-    # copy immediately instead of waiting for an event that may never arrive.
+    # Normal photos are received and archived as their own business messages.
+    # A view-once photo is usually exposed only later, nested in the reply to
+    # it. Send an immediate backup only for that previously unseen source;
+    # otherwise replying to an ordinary photo would create an unwanted copy.
     if (
         source_message_id != message.message_id
+        and not source_was_already_archived
         and media_type
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
@@ -999,7 +1008,7 @@ async def on_business_message(message: Message) -> None:
             ).fetchone()
         if saved and not saved["notification_sent"]:
             logger.info(
-                "Sending nested disappearing-media copy immediately: source_message=%s",
+                "Sending previously unseen nested media copy: source_message=%s",
                 source_message_id,
             )
             await send_deleted_message(
