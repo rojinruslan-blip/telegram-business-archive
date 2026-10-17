@@ -63,6 +63,8 @@ DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/messages.sqlite3"))
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if not DATABASE_URL:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+DB_INIT_ATTEMPTS = 8
+DB_INIT_RETRY_DELAY_SECONDS = 5
 SETUP_VIDEO_FILE_ID = os.environ.get("SETUP_VIDEO_FILE_ID", "")
 DEMO_VIDEO_FILE_ID = os.environ.get("DEMO_VIDEO_FILE_ID", "")
 WELCOME_PHOTO_FILE_ID = os.environ.get("WELCOME_PHOTO_FILE_ID", "")
@@ -263,6 +265,38 @@ def init_db() -> None:
                 "ALTER TABLE bot_assets ADD COLUMN caption_entities TEXT NOT NULL DEFAULT '[]'"
             )
         connection.commit()
+
+
+async def init_db_with_retries() -> None:
+    """Wait through short Postgres outages instead of crashing the web service."""
+    for attempt in range(1, DB_INIT_ATTEMPTS + 1):
+        try:
+            await asyncio.to_thread(init_db)
+            return
+        except Exception as exc:
+            error_text = str(exc).lower()
+            transient = any(
+                marker in error_text
+                for marker in (
+                    "eauthquery",
+                    "database system is in recovery mode",
+                    "connection failed",
+                    "connection refused",
+                    "timeout",
+                    "temporarily unavailable",
+                )
+            )
+            if not DATABASE_URL or not transient or attempt == DB_INIT_ATTEMPTS:
+                raise
+            delay = DB_INIT_RETRY_DELAY_SECONDS * attempt
+            logger.warning(
+                "Database is temporarily unavailable; retrying in %ss (%s/%s): %s",
+                delay,
+                attempt,
+                DB_INIT_ATTEMPTS,
+                exc,
+            )
+            await asyncio.sleep(delay)
 
 
 
@@ -1349,7 +1383,7 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
 
 @app.on_event("startup")
 async def startup() -> None:
-    init_db()
+    await init_db_with_retries()
     try:
         await bot.set_my_short_description(short_description=BOT_SHORT_DESCRIPTION)
         await bot.set_my_description(description=BOT_DESCRIPTION)
