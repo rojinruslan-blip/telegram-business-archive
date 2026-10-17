@@ -32,6 +32,7 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 
 
@@ -105,6 +106,7 @@ dispatcher = Dispatcher()
 router = Router()
 dispatcher.include_router(router)
 app = FastAPI(title="Telegram Business message archive")
+DB_READY = asyncio.Event()
 SEEN_UPDATE_IDS: set[int] = set()
 RECENT_UPDATE_IDS: deque[int] = deque(maxlen=4096)
 CONNECTION_OWNER_CACHE: dict[str, int] = {}
@@ -297,6 +299,24 @@ async def init_db_with_retries() -> None:
                 exc,
             )
             await asyncio.sleep(delay)
+
+
+async def initialize_database_forever() -> None:
+    """Keep the service alive while Supabase is recovering and reconnect automatically."""
+    retry_delay = 5
+    while not DB_READY.is_set():
+        try:
+            await init_db_with_retries()
+            DB_READY.set()
+            logger.info("Database is ready; Telegram updates can be processed")
+            return
+        except Exception:
+            logger.exception(
+                "Database is still unavailable; the service stays online and will retry in %ss",
+                retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
 
 
 
@@ -1350,6 +1370,11 @@ async def health() -> dict[str, str]:
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request) -> dict[str, bool]:
+    if not DB_READY.is_set():
+        return JSONResponse(
+            {"ok": False, "error": "database_unavailable"},
+            status_code=503,
+        )
     payload = await request.json()
     update_id = payload.get("update_id")
     if isinstance(update_id, int):
@@ -1383,7 +1408,7 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
 
 @app.on_event("startup")
 async def startup() -> None:
-    await init_db_with_retries()
+    asyncio.create_task(initialize_database_forever())
     try:
         await bot.set_my_short_description(short_description=BOT_SHORT_DESCRIPTION)
         await bot.set_my_description(description=BOT_DESCRIPTION)
