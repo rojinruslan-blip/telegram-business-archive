@@ -985,7 +985,8 @@ async def on_business_message(message: Message) -> None:
     source = media_source(message)
     sender = source.from_user.full_name if source.from_user else "Неизвестный отправитель"
     sender_id = source.from_user.id if source.from_user else message.chat.id
-    text = source.text or source.caption or f"[{source.content_type}]"
+    # Media-only messages do not need an internal ContentType label.
+    text = source.text or source.caption or ""
     media_type, media_file_id = extract_media(source)
     timer_media = is_timer_media(source)
     source_message_id = source.message_id
@@ -995,17 +996,18 @@ async def on_business_message(message: Message) -> None:
     message_ids = {source_message_id, message.message_id}
     with closing(db()) as database:
         # A normal photo has already been received as its own message and has
-        # a durable local copy.  A view-once photo can also have a placeholder
-        # row, but without bytes; do not mistake that for an ordinary photo.
-        source_has_durable_copy = False
+        # a saved row/file_id. A view-once photo is often exposed only later
+        # inside a reply, so it has no previously saved source row.
+        source_has_saved_copy = False
         if source_message_id != message.message_id:
             previous_source = database.execute(
-                """SELECT media_bytes FROM messages
+                """SELECT media_bytes, media_file_id FROM messages
                    WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
                 (message.business_connection_id, message.chat.id, source_message_id),
             ).fetchone()
-            source_has_durable_copy = bool(
-                previous_source and previous_source["media_bytes"]
+            source_has_saved_copy = bool(
+                previous_source
+                and (previous_source["media_bytes"] or previous_source["media_file_id"])
             )
         for archive_message_id in message_ids:
             # For a reply to view-once media Telegram may send the deletion
@@ -1052,11 +1054,12 @@ async def on_business_message(message: Message) -> None:
     # A view-once photo is usually exposed only later, nested in the reply to
     # it. Send an immediate backup only for that previously unseen source;
     # otherwise replying to an ordinary photo would create an unwanted copy.
+    # Telegram does not always expose the timer marker in Business updates,
+    # so the previously saved source row is the reliable fallback.
     if (
         source_message_id != message.message_id
-        and not source_has_durable_copy
+        and not source_has_saved_copy
         and media_type
-        and timer_media
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
         with closing(db()) as database:
@@ -1091,7 +1094,7 @@ async def on_business_message(message: Message) -> None:
 async def on_edited_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
         return
-    text = message.text or message.caption or f"[{message.content_type}]"
+    text = message.text or message.caption or ""
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     with closing(db()) as database:
@@ -1126,9 +1129,8 @@ def build_chat_backup(rows: list[sqlite3.Row]) -> bytes:
     """Create a readable transcript of messages removed from a chat."""
     lines = ["Удалённые сообщения", ""]
     for row in sorted(rows, key=lambda item: item["message_id"]):
-        media = f" [{row['media_type']}]" if row["media_type"] else ""
         body = row["text"] or "[без текста]"
-        lines.extend((f"{row['sender_name'] or 'Неизвестный отправитель'}{media}", body, ""))
+        lines.extend((row["sender_name"] or "Неизвестный отправитель", body, ""))
     return "\n".join(lines).encode("utf-8")
 
 
