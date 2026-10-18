@@ -61,7 +61,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "data/messages.sqlite3"))
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+# This bot only needs short-lived local state for notifications and media
+# copies. Keep it independent from an external database service.
+DATABASE_URL = ""
 if not DATABASE_URL:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 DB_INIT_ATTEMPTS = 8
@@ -1054,6 +1056,7 @@ async def on_business_message(message: Message) -> None:
         source_message_id != message.message_id
         and not source_has_durable_copy
         and media_type
+        and timer_media
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
         with closing(db()) as database:
