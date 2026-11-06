@@ -844,8 +844,12 @@ def _extra_has_timer_marker(value: object) -> bool:
 
 
 def is_timer_media(message: Message) -> bool:
+    # View-once applies to visual media. A voice message or an ordinary reply
+    # must never be classified as timed media merely because it is nested.
+    if not (message.photo or message.video):
+        return False
     media_items = [message]
-    for attribute in ("photo", "video", "audio", "document", "animation", "voice", "video_note"):
+    for attribute in ("photo", "video"):
         value = getattr(message, attribute, None)
         if isinstance(value, list):
             media_items.extend(value)
@@ -1050,16 +1054,14 @@ async def on_business_message(message: Message) -> None:
             "Business media copy saved: message=%s media_type=%s timer_media=%s bytes=%s",
             source_message_id, media_type, timer_media, len(media_bytes) if media_bytes else 0,
         )
-    # Normal photos are received and archived as their own business messages.
-    # A view-once photo is usually exposed only later, nested in the reply to
-    # it. Send an immediate backup only for that previously unseen source;
-    # otherwise replying to an ordinary photo would create an unwanted copy.
-    # Telegram does not always expose the timer marker in Business updates,
-    # so the previously saved source row is the reliable fallback.
+    # A nested reply is not sufficient evidence of a timer: ordinary photos,
+    # videos and voices can have the same shape. Only copy media when Telegram
+    # exposes an explicit view-once/TTL marker.
     if (
         source_message_id != message.message_id
         and not source_has_saved_copy
         and media_type
+        and timer_media
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
         with closing(db()) as database:
