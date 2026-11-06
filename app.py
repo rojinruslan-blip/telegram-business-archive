@@ -1054,14 +1054,14 @@ async def on_business_message(message: Message) -> None:
             "Business media copy saved: message=%s media_type=%s timer_media=%s bytes=%s",
             source_message_id, media_type, timer_media, len(media_bytes) if media_bytes else 0,
         )
-    # A nested reply is not sufficient evidence of a timer: ordinary photos,
-    # videos and voices can have the same shape. Only copy media when Telegram
-    # exposes an explicit view-once/TTL marker.
+    # Telegram does not expose a timer marker in every Business update. A
+    # view-once photo/video instead appears later as nested media that was not
+    # received as a standalone message. Normal media has already been saved,
+    # so do not send it a second time. Voices are never treated as timed media.
     if (
         source_message_id != message.message_id
         and not source_has_saved_copy
-        and media_type
-        and timer_media
+        and media_type in ("photo", "video")
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
         with closing(db()) as database:
