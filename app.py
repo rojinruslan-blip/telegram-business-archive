@@ -844,8 +844,9 @@ def _extra_has_timer_marker(value: object) -> bool:
 
 
 def is_timer_media(message: Message) -> bool:
-    # View-once applies to visual media. A voice message or an ordinary reply
-    # must never be classified as timed media merely because it is nested.
+    # Telegram's view-once feature applies to visual media. In particular, a
+    # voice message or an ordinary reply must never be treated as a timed
+    # photo/video merely because it is nested in a reply update.
     if not (message.photo or message.video):
         return False
     media_items = [message]
@@ -1054,14 +1055,15 @@ async def on_business_message(message: Message) -> None:
             "Business media copy saved: message=%s media_type=%s timer_media=%s bytes=%s",
             source_message_id, media_type, timer_media, len(media_bytes) if media_bytes else 0,
         )
-    # Telegram does not expose a timer marker in every Business update. A
-    # view-once photo/video instead appears later as nested media that was not
-    # received as a standalone message. Normal media has already been saved,
-    # so do not send it a second time. Voices are never treated as timed media.
+    # A view-once photo/video can be exposed later, nested in a reply update.
+    # Do not infer a timer merely from a nested reply: ordinary photos, videos
+    # and voices can have the same shape. That used to create unwanted copies
+    # whenever someone replied to normal media.
     if (
         source_message_id != message.message_id
         and not source_has_saved_copy
-        and media_type in ("photo", "video")
+        and media_type
+        and timer_media
         and owner_settings(owner["owner_chat_id"])["media_timers"]
     ):
         with closing(db()) as database:
@@ -1100,6 +1102,11 @@ async def on_edited_business_message(message: Message) -> None:
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     with closing(db()) as database:
+        previous = database.execute(
+            """SELECT text FROM messages
+               WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
+            (message.business_connection_id, message.chat.id, message.message_id),
+        ).fetchone()
         database.execute(
             """UPDATE messages SET text=?, sender_name=?, sender_id=?
                WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
@@ -1110,13 +1117,22 @@ async def on_edited_business_message(message: Message) -> None:
             (message.business_connection_id,),
         ).fetchone()
         database.commit()
-    if owner and owner_settings(owner["owner_chat_id"])["notify_edits"]:
+    original_text = previous["text"] if previous and previous["text"] else "[без текста]"
+    updated_text = text or "[без текста]"
+    if (
+        owner
+        and original_text != updated_text
+        and owner_settings(owner["owner_chat_id"])["notify_edits"]
+    ):
         reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={sender_id}")
         ]])
         await bot.send_message(
             owner["owner_chat_id"],
-            f"✏️ Сообщение изменено\nОт: {sender}\n\n{text}",
+            (
+                f"✏️ Сообщение изменено\nОт: {sender}\n\n"
+                f"{original_text}\n\n↓\n\n{updated_text}"
+            )[:4096],
             reply_markup=reply_markup,
         )
 
