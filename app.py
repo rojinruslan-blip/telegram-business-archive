@@ -1127,7 +1127,10 @@ async def on_edited_business_message(message: Message) -> None:
     if original_text == new_text:
         return
 
-    body = f"{original_text or '[оригинал не найден в архиве]'}\n\n↓\n\n{new_text or '[без текста]'}"
+    body = (
+        f"{original_text or '[оригинал не найден в архиве]'} (оригинал)\n\n"
+        f"↓\n\n{new_text or '[без текста]'} (изменено)"
+    )
     owner_chat_id = owner["owner_chat_id"]
     if previous and previous["media_type"]:
         edited_row = {
