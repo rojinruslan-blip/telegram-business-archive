@@ -1097,41 +1097,66 @@ async def on_business_message(message: Message) -> None:
 async def on_edited_business_message(message: Message) -> None:
     if not message.business_connection_id or not message.chat:
         return
-    text = message.text or message.caption or ""
+    new_text = message.text or message.caption or ""
     sender = message.from_user.full_name if message.from_user else "Неизвестный отправитель"
     sender_id = message.from_user.id if message.from_user else message.chat.id
     with closing(db()) as database:
         previous = database.execute(
-            """SELECT text FROM messages
+            """SELECT business_connection_id, chat_id, message_id, sender_name,
+                      sender_id, text, media_type, media_file_id, media_bytes,
+                      message_date, notification_sent
+               FROM messages
                WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
             (message.business_connection_id, message.chat.id, message.message_id),
         ).fetchone()
         database.execute(
             """UPDATE messages SET text=?, sender_name=?, sender_id=?
                WHERE business_connection_id=? AND chat_id=? AND message_id=?""",
-            (text, sender, sender_id, message.business_connection_id, message.chat.id, message.message_id),
+            (new_text, sender, sender_id,
+             message.business_connection_id, message.chat.id, message.message_id),
         )
         owner = database.execute(
             "SELECT owner_chat_id FROM connections WHERE business_connection_id=?",
             (message.business_connection_id,),
         ).fetchone()
         database.commit()
-    original_text = previous["text"] if previous and previous["text"] else "[без текста]"
-    updated_text = text or "[без текста]"
-    if (
-        owner
-        and original_text != updated_text
-        and owner_settings(owner["owner_chat_id"])["notify_edits"]
-    ):
+    if not owner or not owner_settings(owner["owner_chat_id"])["notify_edits"]:
+        return
+
+    original_text = (previous["text"] if previous else "") or ""
+    if original_text == new_text:
+        return
+
+    owner_chat_id = owner["owner_chat_id"]
+    if previous:
+        await send_deleted_message(owner_chat_id, previous, header="«оригинал»")
+    else:
+        await bot.send_message(
+            owner_chat_id,
+            f"«оригинал»\nОт: {sender}\n\n[оригинал не найден в архиве]",
+        )
+
+    if previous and previous["media_type"]:
+        edited_row = {
+            "business_connection_id": message.business_connection_id,
+            "chat_id": message.chat.id,
+            "message_id": message.message_id,
+            "sender_name": sender,
+            "sender_id": sender_id,
+            "text": new_text,
+            "media_type": previous["media_type"],
+            "media_file_id": previous["media_file_id"],
+            "media_bytes": previous["media_bytes"],
+            "notification_sent": 0,
+        }
+        await send_deleted_message(owner_chat_id, edited_row, header="«изменено»")
+    else:
         reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={sender_id}")
         ]])
         await bot.send_message(
-            owner["owner_chat_id"],
-            (
-                f"✏️ Сообщение изменено\nОт: {sender}\n\n"
-                f"{original_text}\n\n↓\n\n{updated_text}"
-            )[:4096],
+            owner_chat_id,
+            f"«изменено»\nОт: {sender}\n\n{new_text or '[без текста]'}",
             reply_markup=reply_markup,
         )
 
