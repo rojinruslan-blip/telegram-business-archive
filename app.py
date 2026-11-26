@@ -1127,15 +1127,8 @@ async def on_edited_business_message(message: Message) -> None:
     if original_text == new_text:
         return
 
+    body = f"{original_text or '[оригинал не найден в архиве]'}\n\n↓\n\n{new_text or '[без текста]'}"
     owner_chat_id = owner["owner_chat_id"]
-    if previous:
-        await send_deleted_message(owner_chat_id, previous, header="«оригинал»")
-    else:
-        await bot.send_message(
-            owner_chat_id,
-            f"«оригинал»\nОт: {sender}\n\n[оригинал не найден в архиве]",
-        )
-
     if previous and previous["media_type"]:
         edited_row = {
             "business_connection_id": message.business_connection_id,
@@ -1143,20 +1136,20 @@ async def on_edited_business_message(message: Message) -> None:
             "message_id": message.message_id,
             "sender_name": sender,
             "sender_id": sender_id,
-            "text": new_text,
+            "text": body,
             "media_type": previous["media_type"],
             "media_file_id": previous["media_file_id"],
             "media_bytes": previous["media_bytes"],
             "notification_sent": 0,
         }
-        await send_deleted_message(owner_chat_id, edited_row, header="«изменено»")
+        await send_deleted_message(owner_chat_id, edited_row, header="✏️ Сообщение изменено")
     else:
         reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Открыть чат", url=f"tg://user?id={sender_id}")
         ]])
         await bot.send_message(
             owner_chat_id,
-            f"«изменено»\nОт: {sender}\n\n{new_text or '[без текста]'}",
+            f"✏️ Сообщение изменено\nОт: {sender}\n\n{body}"[:4096],
             reply_markup=reply_markup,
         )
 
